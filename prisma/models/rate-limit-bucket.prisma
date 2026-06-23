@@ -1,0 +1,10 @@
+model RateLimitBucket {
+  key       String   @id @db.VarChar(64)
+  count     Int      @default(0)
+  resetAt   DateTime @map("reset_at") @db.Timestamptz
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([resetAt])
+  @@map("rate_limit_bucket")
+}

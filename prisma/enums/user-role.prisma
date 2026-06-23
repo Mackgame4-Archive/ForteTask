@@ -1,0 +1,9 @@
+enum UserRole {
+  ADMIN
+  MANAGER
+  COORDINATOR
+  CONTRIBUTOR
+  MEMBER
+
+  @@map("user_role")
+}

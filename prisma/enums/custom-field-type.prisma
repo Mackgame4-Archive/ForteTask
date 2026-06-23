@@ -1,0 +1,13 @@
+enum CustomFieldType {
+  STRING
+  INTEGER
+
+  @@map("custom_field_type")
+}
+
+enum BoardCustomFieldType {
+  STRING
+  INTEGER
+
+  @@map("board_custom_field_type")
+}

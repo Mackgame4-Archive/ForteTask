@@ -1,0 +1,85 @@
+model Task {
+  id          Int       @id @default(autoincrement())
+  tenantId    Int?      @map("tenant_id")
+  columnId    Int?      @map("column_id")
+  createdById Int?      @map("created_by_id")
+  title       String    @db.VarChar(255)
+  description String?
+  completed   Boolean   @default(false)
+  position    Int       @default(0)
+  startDate   DateTime? @map("start_date") @db.Timestamptz
+  dueDate     DateTime? @map("due_date") @db.Timestamptz
+  completedAt DateTime? @map("completed_at") @db.Timestamptz
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  tenant    Tenant?      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  column    BoardColumn? @relation(fields: [columnId], references: [id], onDelete: Cascade)
+  createdBy User?        @relation("TaskCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  labels    TaskLabel[]
+  subTasks  SubTask[]
+  assignees TaskAssignee[]
+  customFieldValues TaskCustomFieldValue[]
+
+  @@index([tenantId])
+  @@index([columnId])
+  @@index([createdById])
+  @@index([startDate])
+  @@index([dueDate])
+  @@index([completedAt])
+  @@map("task")
+}
+
+model TaskCustomFieldValue {
+  taskId      Int     @map("task_id")
+  customFieldId Int   @map("custom_field_id")
+  stringValue String? @map("string_value") @db.VarChar(255)
+  integerValue Int?   @map("integer_value")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  task        Task             @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  customField BoardCustomField @relation(fields: [customFieldId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, customFieldId])
+  @@index([customFieldId])
+  @@map("task_custom_field_value")
+}
+
+model TaskAssignee {
+  taskId    Int      @map("task_id")
+  userId    Int      @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, userId])
+  @@index([userId])
+  @@map("task_assignee")
+}
+
+model TaskLabel {
+  taskId       Int      @map("task_id")
+  boardLabelId Int      @map("board_label_id")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  task  Task       @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  label BoardLabel @relation(fields: [boardLabelId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, boardLabelId])
+  @@index([boardLabelId])
+  @@map("task_board_label")
+}
+
+model SubTask {
+  id          Int       @id @default(autoincrement())
+  taskId      Int       @map("task_id")
+  title       String    @db.VarChar(255)
+  completedAt DateTime? @map("completed_at") @db.Timestamptz
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+  @@map("sub_task")
+}

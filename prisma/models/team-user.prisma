@@ -1,0 +1,12 @@
+model TeamUser {
+  userId    Int      @map("user_id")
+  teamId    Int      @map("team_id")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@id([userId, teamId])
+  @@index([teamId])
+  @@map("team_user")
+}

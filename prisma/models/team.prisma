@@ -1,0 +1,18 @@
+model Team {
+  id        Int      @id @default(autoincrement())
+  tenantId  Int      @map("tenant_id")
+  name      String   @db.VarChar(120)
+  slug      String   @db.VarChar(80)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  users  TeamUser[]
+  boards BoardTeam[]
+
+  @@unique([tenantId, slug])
+  @@index([tenantId])
+  @@index([deletedAt])
+  @@map("team")
+}

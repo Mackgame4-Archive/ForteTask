@@ -1,0 +1,6 @@
+enum MarketingPlatform {
+  META_ADS @map("Meta Ads")
+  GOOGLE_ADS @map("Google Ads")
+
+  @@map("marketing_platform")
+}

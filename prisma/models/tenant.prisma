@@ -1,0 +1,18 @@
+model Tenant {
+  id        Int      @id @default(autoincrement())
+  name      String   @db.VarChar(120)
+  slug      String   @unique @db.VarChar(80)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  teams Team[]
+  users TenantUser[]
+  boards Board[]
+  tasks Task[]
+  marketingExpenses MarketingExpense[]
+  redicomSales RedicomSale[]
+
+  @@index([deletedAt])
+  @@map("tenant")
+}
