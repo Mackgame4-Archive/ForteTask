@@ -1,10 +1,16 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { verifySession } from "@/lib/auth/session";
-import type { ChatCallSignal, ChatMessage, ChatSocketEvent } from "@/lib/utils/sockets";
+import type {
+  ChatCallSignal,
+  ChatMessage,
+  ChatSocketEvent,
+  ChatSocketUser,
+} from "@/lib/utils/sockets";
 
 const globalChatStore = globalThis as typeof globalThis & {
   __forteTaskChatMessages?: Map<string, ChatMessage[]>;
+  __forteTaskChatPresence?: Map<string, Map<number, ChatSocketUser>>;
   __forteTaskChatSubscribers?: Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>;
 };
 
@@ -12,6 +18,7 @@ type ChatPostPayload = Partial<ChatMessage> & {
   message?: Partial<ChatMessage>;
   signal?: Partial<ChatCallSignal>;
   type?: ChatSocketEvent["type"];
+  user?: Partial<ChatSocketUser>;
 };
 
 function getMessageStore() {
@@ -22,6 +29,15 @@ function getMessageStore() {
 
 function getRoomMessages(roomId: string) {
   return getMessageStore().get(roomId) ?? [];
+}
+
+function getPresenceStore() {
+  globalChatStore.__forteTaskChatPresence ??= new Map<
+    string,
+    Map<number, ChatSocketUser>
+  >();
+
+  return globalChatStore.__forteTaskChatPresence;
 }
 
 function getSubscriberStore() {
@@ -83,6 +99,14 @@ export async function GET(request: NextRequest) {
           }));
         }
 
+        for (const user of getPresenceStore().get(roomId)?.values() ?? []) {
+          controller.enqueue(encodeSseEvent({
+            type: "chat:join",
+            roomId,
+            user,
+          }));
+        }
+
         request.signal.addEventListener("abort", () => {
           clearInterval(heartbeat);
           roomSubscribers.delete(controller);
@@ -125,6 +149,53 @@ export async function POST(request: NextRequest) {
     payload.type === "chat:signal"
       ? payload.signal
       : null;
+  const presenceType =
+    payload.type === "chat:join" || payload.type === "chat:leave"
+      ? payload.type
+      : null;
+  const presenceUser =
+    presenceType
+      ? payload.user
+      : null;
+
+  if (presenceType && presenceUser) {
+    if (
+      !payload.roomId ||
+      !presenceUser.id ||
+      presenceUser.id !== session.userId ||
+      !presenceUser.name ||
+      !presenceUser.email
+    ) {
+      return NextResponse.json(
+        { error: "Presenca invalida." },
+        { status: 400 }
+      );
+    }
+
+    const presence = getPresenceStore();
+    const roomPresence = presence.get(payload.roomId) ?? new Map<number, ChatSocketUser>();
+
+    if (presenceType === "chat:join") {
+      roomPresence.set(presenceUser.id, presenceUser as ChatSocketUser);
+      presence.set(payload.roomId, roomPresence);
+    } else {
+      roomPresence.delete(presenceUser.id);
+
+      if (roomPresence.size) {
+        presence.set(payload.roomId, roomPresence);
+      } else {
+        presence.delete(payload.roomId);
+      }
+    }
+
+    publishEvent(payload.roomId, {
+      type: presenceType,
+      roomId: payload.roomId,
+      user: presenceUser as ChatSocketUser,
+    });
+
+    return NextResponse.json({ sent: true });
+  }
 
   if (signal) {
     const callSignal = signal as Partial<ChatCallSignal>;

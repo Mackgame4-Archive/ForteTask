@@ -1,6 +1,6 @@
 "use client";
 
-import type { ChatCallKind, ChatCallSignal } from "@/lib/utils/sockets";
+import type { ChatCallKind } from "@/lib/utils/sockets";
 
 export type { ChatCallKind, ChatCallSignal } from "@/lib/utils/sockets";
 
@@ -22,6 +22,16 @@ export type ChatPeerCall = {
   setRemoteAnswer: (answer: RTCSessionDescriptionInit) => Promise<void>;
 };
 
+function createCallError(name: string, message: string) {
+  if (typeof DOMException !== "undefined") {
+    return new DOMException(message, name);
+  }
+
+  const error = new Error(message);
+  error.name = name;
+  return error;
+}
+
 function createCallId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();
@@ -38,9 +48,26 @@ async function createChatPeerCall({
 }: ChatPeerCallOptions): Promise<ChatPeerCall> {
   let localMediaError: unknown = null;
   let localStream: MediaStream | null = null;
+
+  if (typeof RTCPeerConnection === "undefined") {
+    throw createCallError(
+      "NotSupportedError",
+      "Este navegador nao suporta chamadas WebRTC."
+    );
+  }
+
   const peerConnection = new RTCPeerConnection({ iceServers });
 
   try {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw createCallError(
+        typeof window !== "undefined" && !window.isSecureContext
+          ? "SecurityError"
+          : "NotSupportedError",
+        "Chamadas precisam de HTTPS ou localhost."
+      );
+    }
+
     localStream = await navigator.mediaDevices.getUserMedia({
       audio: true,
       video: kind === "video",

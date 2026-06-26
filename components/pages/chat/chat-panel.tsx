@@ -54,13 +54,6 @@ type ActiveCall = {
   status: "calling" | "connected" | "ringing";
 };
 
-const statusLabels: Record<ChatSocketStatus, string> = {
-  closed: "Desligado",
-  connected: "Ligado",
-  connecting: "A ligar",
-  fallback: "Local",
-};
-
 function getInitials(name: string) {
   return (
     name
@@ -82,6 +75,10 @@ function getCallRoomId(roomScope: string, userId: number) {
   return `${roomScope}:calls:${userId}`;
 }
 
+function getPresenceRoomId(roomScope: string) {
+  return `${roomScope}:presence`;
+}
+
 function getCallErrorMessage(error: unknown) {
   if (!(error instanceof Error)) {
     return "Nao foi possivel iniciar a chamada.";
@@ -99,6 +96,10 @@ function getCallErrorMessage(error: unknown) {
     return "Microfone ou camara ja esta em uso.";
   }
 
+  if (error.name === "NotSupportedError") {
+    return "Este navegador nao suporta chamadas.";
+  }
+
   if (error.name === "SecurityError") {
     return "Chamadas precisam de HTTPS ou localhost.";
   }
@@ -112,9 +113,10 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [membersCollapsed, setMembersCollapsed] = useState(false);
   const [messagesByRoom, setMessagesByRoom] = useState<Record<string, ChatMessage[]>>({});
+  const [onlineMemberIds, setOnlineMemberIds] = useState<Set<number>>(new Set());
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [selectedMemberId, setSelectedMemberId] = useState(members[0]?.id ?? null);
-  const [status, setStatus] = useState<ChatSocketStatus>(
+  const [, setStatus] = useState<ChatSocketStatus>(
     socketUrl ? "connecting" : "fallback"
   );
   const [, startTransition] = useTransition();
@@ -124,6 +126,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   const callRef = useRef<ChatPeerCall | null>(null);
   const connectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
+  const presenceConnectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
   const seenMessageIdsRef = useRef(new Set<string>());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const pendingIceCandidatesRef = useRef<Record<string, RTCIceCandidateInit[]>>({});
@@ -138,13 +141,13 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     : null;
   const messages = roomId ? messagesByRoom[roomId] ?? [] : [];
   const canSend = Boolean(roomId && draft.trim().length > 0);
-  const connectionLabel = statusLabels[status];
-  const connectionDotClassName = cn(
+  const selectedMemberOnline = Boolean(
+    selectedMember && onlineMemberIds.has(selectedMember.id)
+  );
+  const selectedMemberDotClassName = cn(
     "size-2 rounded-full",
-    status === "connected"
+    selectedMemberOnline
       ? "bg-primary"
-      : status === "connecting"
-        ? "bg-muted-foreground"
       : "bg-border"
   );
   const callStatusLabel =
@@ -528,6 +531,36 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   }, [roomScope, socketUrl, user]);
 
   useEffect(() => {
+    const connection = connectChatSocket({
+      roomId: getPresenceRoomId(roomScope),
+      url: socketUrl,
+      user,
+      announcePresence: true,
+      onMessage: () => {},
+      onPresenceChange: (presenceUser, online) => {
+        setOnlineMemberIds((currentOnlineMemberIds) => {
+          const nextOnlineMemberIds = new Set(currentOnlineMemberIds);
+
+          if (online) {
+            nextOnlineMemberIds.add(presenceUser.id);
+          } else {
+            nextOnlineMemberIds.delete(presenceUser.id);
+          }
+
+          return nextOnlineMemberIds;
+        });
+      },
+    });
+
+    presenceConnectionRef.current = connection;
+
+    return () => {
+      connection.close();
+      presenceConnectionRef.current = null;
+    };
+  }, [roomScope, socketUrl, user]);
+
+  useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: "end" });
   }, [messages]);
 
@@ -596,8 +629,9 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
                 <AvatarFallback>{getInitials(selectedMember.name)}</AvatarFallback>
               </Avatar>
               <div className="min-w-0">
-                <h2 className="truncate text-sm font-semibold">
-                  {selectedMember.name}
+                <h2 className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+                  <span className={selectedMemberDotClassName} aria-hidden="true" />
+                  <span className="truncate">{selectedMember.name}</span>
                 </h2>
                 <p className="truncate text-xs text-muted-foreground">
                   {messageCountLabel}
@@ -648,10 +682,6 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
               >
                 <Video />
               </Button>
-            </div>
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <span className={connectionDotClassName} />
-              {connectionLabel}
             </div>
           </div>
         </header>
@@ -811,8 +841,19 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
                   {membersCollapsed ? null : (
                     <>
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate text-sm font-medium">
-                          {member.name}
+                        <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
+                          <span
+                            className={cn(
+                              "size-2 shrink-0 rounded-full",
+                              onlineMemberIds.has(member.id)
+                                ? "bg-primary"
+                                : "bg-border"
+                            )}
+                            aria-hidden="true"
+                          />
+                          <span className="truncate">
+                            {member.name}
+                          </span>
                         </span>
                         <span className="block truncate text-xs text-muted-foreground">
                           {member.email}
@@ -823,8 +864,19 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
                       ) : null}
                     </>
                   )}
+                  {membersCollapsed ? (
+                    <span
+                      className={cn(
+                        "absolute right-2 top-1.5 size-2 rounded-full",
+                        onlineMemberIds.has(member.id)
+                          ? "bg-primary"
+                          : "bg-border"
+                      )}
+                      aria-hidden="true"
+                    />
+                  ) : null}
                   {membersCollapsed && unreadCount ? (
-                    <span className="absolute right-2 top-1.5 flex size-4 items-center justify-center bg-primary text-[10px] font-medium text-primary-foreground">
+                    <span className="absolute right-2 top-4 flex size-4 items-center justify-center bg-primary text-[10px] font-medium text-primary-foreground">
                       {unreadCount}
                     </span>
                   ) : null}
@@ -838,7 +890,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
                 membersCollapsed && "px-0 text-[0]"
               )}
             >
-              Não existem membros disponíveis para conversar.
+              NÃ£o existem membros disponÃ­veis para conversar.
             </div>
           )}
         </div>

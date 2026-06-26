@@ -70,6 +70,11 @@ export type ChatSocketEvent =
       user: ChatSocketUser;
     }
   | {
+      type: "chat:leave";
+      roomId: string;
+      user: ChatSocketUser;
+    }
+  | {
       type: "chat:message";
       message: ChatMessage;
     }
@@ -82,7 +87,9 @@ type ChatSocketOptions = {
   roomId: string;
   user: ChatSocketUser;
   url?: string;
+  announcePresence?: boolean;
   onMessage: (message: ChatMessage) => void;
+  onPresenceChange?: (user: ChatSocketUser, online: boolean) => void;
   onSignal?: (signal: ChatCallSignal) => void;
   onStatusChange?: (status: ChatSocketStatus) => void;
 };
@@ -101,6 +108,7 @@ function parseSocketEvent(value: string): ChatSocketEvent | null {
 
     if (
       event.type === "chat:join" ||
+      event.type === "chat:leave" ||
       event.type === "chat:message" ||
       event.type === "chat:signal"
     ) {
@@ -145,7 +153,9 @@ function connectChatSocket({
   roomId,
   user,
   url,
+  announcePresence,
   onMessage,
+  onPresenceChange,
   onSignal,
   onStatusChange,
 }: ChatSocketOptions): ChatSocketConnection {
@@ -162,6 +172,16 @@ function connectChatSocket({
   }
 
   function handleEvent(event: ChatSocketEvent) {
+    if (event.type === "chat:join" && event.roomId === roomId) {
+      onPresenceChange?.(event.user, true);
+      return;
+    }
+
+    if (event.type === "chat:leave" && event.roomId === roomId) {
+      onPresenceChange?.(event.user, false);
+      return;
+    }
+
     if (event.type === "chat:message" && event.message.roomId === roomId) {
       onMessage(event.message);
       return;
@@ -170,6 +190,38 @@ function connectChatSocket({
     if (event.type === "chat:signal" && event.signal.roomId === roomId) {
       onSignal?.(event.signal);
     }
+  }
+
+  function createPresenceEvent(type: "chat:join" | "chat:leave") {
+    return {
+      type,
+      roomId,
+      user,
+    } satisfies ChatSocketEvent;
+  }
+
+  function postEvent(event: ChatSocketEvent) {
+    const body = JSON.stringify(event);
+
+    if (typeof navigator !== "undefined" && "sendBeacon" in navigator) {
+      const sent = navigator.sendBeacon(
+        "/api/chat/messages",
+        new Blob([body], { type: "application/json" })
+      );
+
+      if (sent) {
+        return;
+      }
+    }
+
+    void fetch("/api/chat/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body,
+      keepalive: true,
+    });
   }
 
   function startFallback() {
@@ -203,6 +255,10 @@ function connectChatSocket({
         setStatus("fallback");
       }
     });
+
+    if (announcePresence) {
+      postEvent(createPresenceEvent("chat:join"));
+    }
   }
 
   fallbackChannel?.addEventListener("message", (event: MessageEvent<ChatSocketEvent>) => {
@@ -258,6 +314,9 @@ function connectChatSocket({
   return {
     close: () => {
       closed = true;
+      if (announcePresence) {
+        postEvent(createPresenceEvent("chat:leave"));
+      }
       setStatus("closed");
       fallbackSource?.close();
       socket?.close();
