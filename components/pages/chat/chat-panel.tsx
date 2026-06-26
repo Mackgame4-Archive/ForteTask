@@ -110,7 +110,6 @@ type ChatConversation =
     };
 
 const incomingCallPopupPosition = "bottom-right" as const;
-const activeCallPopupPosition = "center" as const;
 const callRingTimeoutMs = 40_000;
 
 function getInitials(name: string) {
@@ -232,7 +231,6 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   const pendingIncomingOffersRef = useRef<
     Record<string, Extract<ChatCallSignal, { type: "call:offer" }>[]>
   >({});
-  const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const remoteAudioRefs = useRef<Record<number, HTMLAudioElement | null>>({});
   const remoteVideoRefs = useRef<Record<number, HTMLVideoElement | null>>({});
   const screenPopup = useScreenPopup();
@@ -287,19 +285,6 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
       : activeCall?.status === "ringing"
         ? "A atender"
         : "Em chamada";
-  const callDescriptionLabel =
-    activeCall?.status === "calling"
-      ? "A chamar..."
-      : activeCall?.kind === "video"
-        ? "Videochamada"
-        : "Chamada";
-  const remoteStreams = useMemo(
-    () => Object.entries(remoteStreamsByUserId).map(([memberId, stream]) => ({
-      memberId: Number(memberId),
-      stream,
-    })),
-    [remoteStreamsByUserId]
-  );
   const callParticipants = useMemo(() => {
     if (!activeCall) {
       return [];
@@ -399,6 +384,22 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     const message = createChatMessage({
       body: "Chamada perdida",
       roomId,
+      user,
+    });
+
+    postMessage(message);
+  }, [postMessage, user]);
+
+  const sendCallMessage = useCallback((body: string) => {
+    const currentCall = activeCallRef.current;
+
+    if (!currentCall) {
+      return;
+    }
+
+    const message = createChatMessage({
+      body,
+      roomId: currentCall.conversationRoomId,
       user,
     });
 
@@ -1343,78 +1344,45 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   }, [remoteStreamsByUserId]);
 
   useEffect(() => {
-    if (remoteAudioRef.current) {
-      remoteAudioRef.current.srcObject =
-        activeCall?.kind === "audio" ? remoteStreams[0]?.stream ?? null : null;
+    for (const [memberId, stream] of Object.entries(remoteStreamsByUserId)) {
+      const audio = remoteAudioRefs.current[Number(memberId)];
+
+      if (audio) {
+        audio.srcObject = stream;
+      }
     }
-  }, [activeCall?.kind, remoteStreams]);
+  }, [remoteStreamsByUserId]);
 
   useEffect(() => {
-    if (!activeCall) {
-      screenPopup.hide(activeCallPopupPosition);
+    if (!localStream) {
+      setMicEnabled(true);
+      setCameraEnabled(true);
       return;
     }
 
-    screenPopup.show(
-      activeCallPopupPosition,
-      <div className="w-[min(42rem,calc(100vw-2rem))] border border-border bg-popover p-4 text-popover-foreground shadow-md">
-        <audio ref={remoteAudioRef} autoPlay />
-        <div className="mb-3 flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium">
-              {callStatusLabel}
-              {activeCall ? ` ${activeCall.conversationTitle}` : ""}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              {callDescriptionLabel}
-            </p>
-          </div>
-          <Button
-            type="button"
-            variant="destructive"
-            size="sm"
-            onClick={() => endActiveCallRef.current()}
-          >
-            <PhoneOff />
-            Terminar
-          </Button>
-        </div>
-        {activeCall.kind === "video" ? (
-          <div className="grid gap-2 sm:grid-cols-2">
-            {remoteStreams.map(({ memberId }) => (
-              <video
-                key={memberId}
-                ref={(node) => {
-                  remoteVideoRefs.current[memberId] = node;
-                  if (node) {
-                    node.srcObject = remoteStreamsByUserId[memberId] ?? null;
-                  }
-                }}
-                autoPlay
-                playsInline
-                className="aspect-video w-full bg-muted object-cover"
-              />
-            ))}
-            <video
-              ref={(node) => {
-                localVideoRef.current = node;
-                if (node) {
-                  node.srcObject = localStream;
-                }
-              }}
-              autoPlay
-              muted
-              playsInline
-              className="aspect-video w-full bg-muted object-cover"
-            />
-          </div>
-        ) : null}
-      </div>,
-      {
-        className: "w-[min(42rem,calc(100vw-2rem))]",
-      }
-    );
-  }, [activeCall, callDescriptionLabel, callStatusLabel, localStream, remoteStreams, remoteStreamsByUserId, screenPopup]);
+    setMicEnabled(localStream.getAudioTracks().some((track) => track.enabled));
+    setCameraEnabled(localStream.getVideoTracks().some((track) => track.enabled));
+  }, [localStream]);
+
+  useEffect(() => {
+    if (!activeCall) {
+      setCallChatOpen(false);
+    }
+  }, [activeCall]);
+
+  useEffect(() => {
+    if (!activeCall || activeCall.status !== "connected") {
+      setCallElapsedLabel("");
+      return;
+    }
+
+    const update = () => setCallElapsedLabel(formatCallDuration(activeCall.startedAt));
+
+    update();
+    const interval = setInterval(update, 1000);
+
+    return () => clearInterval(interval);
+  }, [activeCall]);
 
   function sendMessage() {
     const body = draft.trim();
@@ -1851,6 +1819,29 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
         </div>
       </aside>
       </section>
+
+      {activeCall ? (
+        <CallScreen
+          title={activeCall.conversationTitle}
+          statusLabel={callStatusLabel}
+          elapsedLabel={callElapsedLabel}
+          kind={activeCall.kind}
+          participants={callParticipants}
+          currentUserId={user.id}
+          localVideoRef={localVideoRef}
+          remoteVideoRefs={remoteVideoRefs}
+          remoteAudioRefs={remoteAudioRefs}
+          micEnabled={micEnabled}
+          cameraEnabled={cameraEnabled}
+          chatOpen={callChatOpen}
+          messages={callMessages}
+          onToggleMic={toggleMic}
+          onToggleCamera={toggleCamera}
+          onToggleChat={() => setCallChatOpen((open) => !open)}
+          onExit={() => endActiveCallRef.current()}
+          onSendMessage={sendCallMessage}
+        />
+      ) : null}
     </>
   );
 }
