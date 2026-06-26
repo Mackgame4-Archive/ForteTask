@@ -11,13 +11,23 @@ import {
   Users,
   Video,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, useTransition } from "react";
-import { toast } from "sonner";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 
 import { MessageBubble } from "@/components/pages/chat/message-bubble";
+import { useScreenPopup } from "@/components/screen-popup";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogMedia,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -84,6 +94,9 @@ type ChatConversation =
       memberIds: number[];
       group: ChatGroup;
     };
+
+const incomingCallPopupPosition = "center-right" as const;
+const activeCallPopupPosition = "bottom-right" as const;
 
 function getInitials(name: string) {
   return (
@@ -162,6 +175,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   const [groups, setGroups] = useState<ChatGroup[]>([]);
   const [showGroupForm, setShowGroupForm] = useState(false);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [panelError, setPanelError] = useState<string | null>(null);
   const [membersCollapsed, setMembersCollapsed] = useState(false);
   const [messagesByRoom, setMessagesByRoom] = useState<Record<string, ChatMessage[]>>({});
   const [onlineMemberIds, setOnlineMemberIds] = useState<Set<number>>(new Set());
@@ -172,8 +186,8 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   const [, startTransition] = useTransition();
   const activeCallRef = useRef<ActiveCall | null>(null);
   const callConnectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
-  const callToastIdRef = useRef<string | number | null>(null);
   const callRefsRef = useRef<Record<number, ChatPeerCall>>({});
+  const endActiveCallRef = useRef<() => void>(() => {});
   const connectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
   const groupsConnectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -183,6 +197,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   const pendingIceCandidatesRef = useRef<Record<string, RTCIceCandidateInit[]>>({});
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const remoteVideoRefs = useRef<Record<number, HTMLVideoElement | null>>({});
+  const screenPopup = useScreenPopup();
   const conversations = useMemo<ChatConversation[]>(() => {
     const privateConversations = members.map((member) => ({
       id: getPrivateConversationId(member.id),
@@ -242,7 +257,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     [remoteStreamsByUserId]
   );
 
-  function appendMessage(message: ChatMessage) {
+  const appendMessage = useCallback((message: ChatMessage) => {
     if (seenMessageIdsRef.current.has(message.id)) {
       return;
     }
@@ -255,26 +270,28 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
         message,
       ],
     }));
-  }
+  }, []);
 
   function getCandidateKey(callId: string, memberId: number) {
     return `${callId}:${memberId}`;
   }
 
-  function createSignalBase(signal: OutgoingCallSignal): ChatCallSignal {
-    return {
-      ...signal,
-      id: createCallId(),
-      roomId: getCallRoomId(roomScope, signal.toUserId),
-      createdAt: new Date().toISOString(),
-    } as ChatCallSignal;
-  }
+  const createSignalBase = useCallback(
+    (signal: OutgoingCallSignal): ChatCallSignal =>
+      ({
+        ...signal,
+        id: createCallId(),
+        roomId: getCallRoomId(roomScope, signal.toUserId),
+        createdAt: new Date().toISOString(),
+      }) as ChatCallSignal,
+    [roomScope]
+  );
 
-  function sendCallSignal(signal: ChatCallSignal) {
+  const sendCallSignal = useCallback((signal: ChatCallSignal) => {
     callConnectionRef.current?.sendSignal(signal);
-  }
+  }, []);
 
-  async function flushIceCandidates(callId: string) {
+  const flushIceCandidates = useCallback(async (callId: string) => {
     const peerEntries = Object.entries(callRefsRef.current);
 
     for (const [memberIdValue, peerCall] of peerEntries) {
@@ -296,9 +313,9 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
         }
       }
     }
-  }
+  }, []);
 
-  async function addIceCandidate(signal: Extract<ChatCallSignal, { type: "call:candidate" }>) {
+  const addIceCandidate = useCallback(async (signal: Extract<ChatCallSignal, { type: "call:candidate" }>) => {
     const peerCall = callRefsRef.current[signal.fromUserId];
     const candidateKey = getCandidateKey(signal.callId, signal.fromUserId);
 
@@ -319,9 +336,9 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     } catch {
       return;
     }
-  }
+  }, []);
 
-  function clearActiveCall() {
+  const clearActiveCall = useCallback(() => {
     for (const peerCall of Object.values(callRefsRef.current)) {
       peerCall.close();
     }
@@ -331,9 +348,9 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     setActiveCall(null);
     setLocalStream(null);
     setRemoteStreamsByUserId({});
-  }
+  }, []);
 
-  function endActiveCall(notify = true) {
+  const endActiveCall = useCallback((notify = true) => {
     const currentCall = activeCallRef.current;
 
     if (notify && currentCall) {
@@ -350,7 +367,11 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     }
 
     clearActiveCall();
-  }
+  }, [clearActiveCall, createSignalBase, sendCallSignal, user.id]);
+
+  useEffect(() => {
+    endActiveCallRef.current = () => endActiveCall();
+  }, [endActiveCall]);
 
   async function startCall(kind: ChatCallKind) {
     if (!selectedConversation || !selectedConversation.memberIds.length) {
@@ -399,7 +420,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
         callRefsRef.current[memberId] = peerCall;
         setLocalStream((currentStream) => currentStream ?? peerCall.localStream);
         if (peerCall.localMediaError) {
-          toast.warning(getCallErrorMessage(peerCall.localMediaError));
+          setPanelError(getCallErrorMessage(peerCall.localMediaError));
         }
         sendCallSignal(
           createSignalBase({
@@ -413,102 +434,104 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
           })
         );
       }
-      toast.success(
-        selectedConversation.kind === "group"
-          ? "Chamada de grupo iniciada."
-          : kind === "video" ? "Videochamada iniciada." : "Chamada iniciada."
-      );
     } catch (error) {
       clearActiveCall();
-      toast.error(getCallErrorMessage(error));
+      setPanelError(getCallErrorMessage(error));
     }
   }
 
-  async function answerIncomingCall(
-    signal: Extract<ChatCallSignal, { type: "call:offer" }>
-  ) {
-    endActiveCall(false);
-    setSelectedConversationId(getPrivateConversationId(signal.fromUserId));
+  const answerIncomingCall = useCallback(
+    async (signal: Extract<ChatCallSignal, { type: "call:offer" }>) => {
+      endActiveCall(false);
+      setSelectedConversationId(getPrivateConversationId(signal.fromUserId));
 
-    const nextCall: ActiveCall = {
-      callId: signal.callId,
-      conversationTitle: signal.fromName,
-      kind: signal.kind,
-      memberIds: [signal.fromUserId],
-      status: "ringing",
-    };
-
-    activeCallRef.current = nextCall;
-    setActiveCall(nextCall);
-
-    try {
-      const peerCall = await createChatPeerCall({
+      const nextCall: ActiveCall = {
+        callId: signal.callId,
+        conversationTitle: signal.fromName,
         kind: signal.kind,
+        memberIds: [signal.fromUserId],
+        status: "ringing",
+      };
+
+      activeCallRef.current = nextCall;
+      setActiveCall(nextCall);
+
+      try {
+        const peerCall = await createChatPeerCall({
+          kind: signal.kind,
           onIceCandidate: (candidate) => {
             sendCallSignal(
               createSignalBase({
-              type: "call:candidate",
-              callId: signal.callId,
-              fromUserId: user.id,
-              toUserId: signal.fromUserId,
+                type: "call:candidate",
+                callId: signal.callId,
+                fromUserId: user.id,
+                toUserId: signal.fromUserId,
                 candidate: candidate.toJSON(),
               })
             );
           },
-        onRemoteStream: (stream) => {
-          setRemoteStreamsByUserId((currentStreams) => ({
-            ...currentStreams,
-            [signal.fromUserId]: stream,
-          }));
-        },
-      });
-      const description = await peerCall.answer(signal.description);
+          onRemoteStream: (stream) => {
+            setRemoteStreamsByUserId((currentStreams) => ({
+              ...currentStreams,
+              [signal.fromUserId]: stream,
+            }));
+          },
+        });
+        const description = await peerCall.answer(signal.description);
 
-      callRefsRef.current[signal.fromUserId] = peerCall;
-      setLocalStream(peerCall.localStream);
-      if (peerCall.localMediaError) {
-        toast.warning(getCallErrorMessage(peerCall.localMediaError));
+        callRefsRef.current[signal.fromUserId] = peerCall;
+        setLocalStream(peerCall.localStream);
+        if (peerCall.localMediaError) {
+          setPanelError(getCallErrorMessage(peerCall.localMediaError));
+        }
+        sendCallSignal(
+          createSignalBase({
+            type: "call:answer",
+            callId: signal.callId,
+            fromUserId: user.id,
+            toUserId: signal.fromUserId,
+            description,
+          })
+        );
+        await flushIceCandidates(signal.callId);
+        activeCallRef.current = {
+          ...nextCall,
+          status: "connected",
+        };
+        setActiveCall(activeCallRef.current);
+      } catch (error) {
+        clearActiveCall();
+        setPanelError(getCallErrorMessage(error));
       }
+    },
+    [
+      clearActiveCall,
+      createSignalBase,
+      endActiveCall,
+      flushIceCandidates,
+      sendCallSignal,
+      user.id,
+    ]
+  );
+
+  const declineIncomingCall = useCallback(
+    (signal: Extract<ChatCallSignal, { type: "call:offer" }>) => {
       sendCallSignal(
         createSignalBase({
-          type: "call:answer",
+          type: "call:end",
           callId: signal.callId,
           fromUserId: user.id,
           toUserId: signal.fromUserId,
-          description,
         })
       );
-      await flushIceCandidates(signal.callId);
-      activeCallRef.current = {
-        ...nextCall,
-        status: "connected",
-      };
-      setActiveCall(activeCallRef.current);
-      toast.success("Chamada atendida.");
-    } catch (error) {
-      clearActiveCall();
-      toast.error(getCallErrorMessage(error));
-    }
-  }
+    },
+    [createSignalBase, sendCallSignal, user.id]
+  );
 
-  function declineIncomingCall(signal: Extract<ChatCallSignal, { type: "call:offer" }>) {
-    sendCallSignal(
-      createSignalBase({
-        type: "call:end",
-        callId: signal.callId,
-        fromUserId: user.id,
-        toUserId: signal.fromUserId,
-      })
-    );
-  }
-
-  function showIncomingCall(signal: Extract<ChatCallSignal, { type: "call:offer" }>) {
-    if (callToastIdRef.current) {
-      toast.dismiss(callToastIdRef.current);
-    }
-
-    callToastIdRef.current = toast.custom(
-      (toastId) => (
+  const showIncomingCall = useCallback(
+    (signal: Extract<ChatCallSignal, { type: "call:offer" }>) => {
+      screenPopup.show(
+        incomingCallPopupPosition,
         <div className="flex w-80 flex-col gap-3 border border-border bg-popover p-4 text-popover-foreground shadow-md">
           <div className="flex items-start gap-3">
             <span className="grid size-9 shrink-0 place-items-center bg-primary text-primary-foreground">
@@ -533,8 +556,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
               variant="outline"
               size="sm"
               onClick={() => {
-                toast.dismiss(toastId);
-                callToastIdRef.current = null;
+                screenPopup.hide(incomingCallPopupPosition);
                 declineIncomingCall(signal);
               }}
             >
@@ -545,8 +567,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
               type="button"
               size="sm"
               onClick={() => {
-                toast.dismiss(toastId);
-                callToastIdRef.current = null;
+                screenPopup.hide(incomingCallPopupPosition);
                 void answerIncomingCall(signal);
               }}
             >
@@ -554,59 +575,66 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
               Atender
             </Button>
           </div>
-        </div>
-      ),
-      {
-        duration: 30_000,
-        onDismiss: () => {
-          callToastIdRef.current = null;
-        },
-      }
-    );
-  }
+        </div>,
+        {
+          className: "w-80",
+        }
+      );
+    },
+    [answerIncomingCall, declineIncomingCall, screenPopup]
+  );
 
-  function handleCallSignal(signal: ChatCallSignal) {
-    if (signal.toUserId !== user.id || signal.fromUserId === user.id) {
-      return;
-    }
-
-    if (signal.type === "call:offer") {
-      showIncomingCall(signal);
-      return;
-    }
-
-    if (signal.type === "call:answer") {
-      const peerCall = callRefsRef.current[signal.fromUserId];
-
-      if (activeCallRef.current?.callId !== signal.callId || !peerCall) {
+  const handleCallSignal = useCallback(
+    (signal: ChatCallSignal) => {
+      if (signal.toUserId !== user.id || signal.fromUserId === user.id) {
         return;
       }
 
-      void peerCall.setRemoteAnswer(signal.description).then(async () => {
-        await flushIceCandidates(signal.callId);
-        activeCallRef.current = {
-          ...activeCallRef.current!,
-          status: "connected",
-        };
-        setActiveCall(activeCallRef.current);
-        toast.success("Chamada ligada.");
-      });
-      return;
-    }
-
-    if (signal.type === "call:candidate") {
-      void addIceCandidate(signal);
-      return;
-    }
-
-    if (signal.type === "call:end") {
-      if (activeCallRef.current?.callId === signal.callId) {
-        clearActiveCall();
+      if (signal.type === "call:offer") {
+        showIncomingCall(signal);
+        return;
       }
 
-      toast.info("Chamada terminada.");
-    }
-  }
+      if (signal.type === "call:answer") {
+        const peerCall = callRefsRef.current[signal.fromUserId];
+
+        if (activeCallRef.current?.callId !== signal.callId || !peerCall) {
+          return;
+        }
+
+        void peerCall.setRemoteAnswer(signal.description).then(async () => {
+          await flushIceCandidates(signal.callId);
+          activeCallRef.current = {
+            ...activeCallRef.current!,
+            status: "connected",
+          };
+          setActiveCall(activeCallRef.current);
+        });
+        return;
+      }
+
+      if (signal.type === "call:candidate") {
+        void addIceCandidate(signal);
+        return;
+      }
+
+      if (signal.type === "call:end") {
+        screenPopup.hide(incomingCallPopupPosition);
+
+        if (activeCallRef.current?.callId === signal.callId) {
+          clearActiveCall();
+        }
+      }
+    },
+    [
+      addIceCandidate,
+      clearActiveCall,
+      flushIceCandidates,
+      showIncomingCall,
+      screenPopup,
+      user.id,
+    ]
+  );
 
   useEffect(() => {
     if (!roomId) {
@@ -626,7 +654,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
       connection.close();
       connectionRef.current = null;
     };
-  }, [roomId, socketUrl, user]);
+  }, [appendMessage, roomId, socketUrl, user]);
 
   useEffect(() => {
     const connection = connectChatSocket({
@@ -643,7 +671,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
       connection.close();
       callConnectionRef.current = null;
     };
-  }, [roomScope, socketUrl, user]);
+  }, [handleCallSignal, roomScope, socketUrl, user]);
 
   useEffect(() => {
     const connection = connectChatSocket({
@@ -731,6 +759,65 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     }
   }, [activeCall?.kind, remoteStreams]);
 
+  useEffect(() => {
+    if (!activeCall) {
+      screenPopup.hide(activeCallPopupPosition);
+      return;
+    }
+
+    screenPopup.show(
+      activeCallPopupPosition,
+      <div className="w-[min(42rem,calc(100vw-2rem))] border border-border bg-popover p-4 text-popover-foreground shadow-md">
+        <audio ref={remoteAudioRef} autoPlay />
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium">
+              {callStatusLabel}
+              {activeCall ? ` com ${activeCall.conversationTitle}` : ""}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {activeCall.kind === "video" ? "Videochamada" : "Chamada"}
+            </p>
+          </div>
+          <Button
+            type="button"
+            variant="destructive"
+            size="sm"
+            onClick={() => endActiveCallRef.current()}
+          >
+            <PhoneOff />
+            Terminar
+          </Button>
+        </div>
+        {activeCall.kind === "video" ? (
+          <div className="grid gap-2 sm:grid-cols-2">
+            {remoteStreams.map(({ memberId }) => (
+              <video
+                key={memberId}
+                ref={(node) => {
+                  remoteVideoRefs.current[memberId] = node;
+                }}
+                autoPlay
+                playsInline
+                className="aspect-video w-full bg-muted object-cover"
+              />
+            ))}
+            <video
+              ref={localVideoRef}
+              autoPlay
+              muted
+              playsInline
+              className="aspect-video w-full bg-muted object-cover"
+            />
+          </div>
+        ) : null}
+      </div>,
+      {
+        className: "w-[min(42rem,calc(100vw-2rem))]",
+      }
+    );
+  }, [activeCall, callStatusLabel, remoteStreams, screenPopup]);
+
   function sendMessage() {
     const body = draft.trim();
 
@@ -763,7 +850,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     const name = groupDraftName.trim();
 
     if (!name || groupDraftMemberIds.length === 0) {
-      toast.error("Escolha um nome e pelo menos um membro.");
+      setPanelError("Escolha um nome e pelo menos um membro.");
       return;
     }
 
@@ -785,7 +872,6 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     setGroupDraftMemberIds([]);
     setShowGroupForm(false);
     setSelectedConversationId(getGroupConversationId(group.id));
-    toast.success("Grupo criado.");
   }
 
   const messageCountLabel = useMemo(
@@ -794,14 +880,38 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   );
 
   return (
-    <section
-      className={cn(
-        "grid h-screen min-h-0 w-full overflow-hidden bg-card",
-        membersCollapsed
-          ? "md:grid-cols-[minmax(0,1fr)_4.5rem]"
-          : "md:grid-cols-[minmax(0,1fr)_20rem]"
-      )}
-    >
+    <>
+      <AlertDialog
+        open={Boolean(panelError)}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) {
+            setPanelError(null);
+          }
+        }}
+      >
+        <AlertDialogContent size="sm">
+          <AlertDialogHeader>
+            <AlertDialogMedia className="bg-destructive/10 text-destructive dark:bg-destructive/20 dark:text-destructive">
+              <PhoneOff className="size-4" />
+            </AlertDialogMedia>
+            <AlertDialogTitle>Erro na chamada</AlertDialogTitle>
+            <AlertDialogDescription>{panelError}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setPanelError(null)}>
+              OK
+            </AlertDialogCancel>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <section
+        className={cn(
+          "grid h-screen min-h-0 w-full overflow-hidden bg-card",
+          membersCollapsed
+            ? "md:grid-cols-[minmax(0,1fr)_4.5rem]"
+            : "md:grid-cols-[minmax(0,1fr)_20rem]"
+        )}
+      >
       <div className="flex min-h-0 flex-col bg-card">
         <header className="flex h-[4.0625rem] items-center justify-between gap-3 border-b border-border px-4 py-3">
           {selectedConversation ? (
@@ -874,53 +984,6 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
         </header>
 
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-background px-4 py-4">
-          {activeCall ? (
-            <div className="border border-border bg-card p-3">
-              <audio ref={remoteAudioRef} autoPlay />
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">
-                    {callStatusLabel}
-                    {activeCall ? ` com ${activeCall.conversationTitle}` : ""}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {activeCall.kind === "video" ? "Videochamada" : "Chamada"}
-                  </p>
-                </div>
-                <Button
-                  type="button"
-                  variant="destructive"
-                  size="sm"
-                  onClick={() => endActiveCall()}
-                >
-                  <PhoneOff />
-                  Terminar
-                </Button>
-              </div>
-              {activeCall.kind === "video" ? (
-                <div className="grid gap-2 sm:grid-cols-2">
-                  {remoteStreams.map(({ memberId }) => (
-                    <video
-                      key={memberId}
-                      ref={(node) => {
-                        remoteVideoRefs.current[memberId] = node;
-                      }}
-                      autoPlay
-                      playsInline
-                      className="aspect-video w-full bg-muted object-cover"
-                    />
-                  ))}
-                  <video
-                    ref={localVideoRef}
-                    autoPlay
-                    muted
-                    playsInline
-                    className="aspect-video w-full bg-muted object-cover"
-                  />
-                </div>
-              ) : null}
-            </div>
-          ) : null}
           {!selectedConversation ? (
             <div className="grid h-full place-items-center text-sm text-muted-foreground">
               Escolha uma conversa.
@@ -1141,7 +1204,8 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
           )}
         </div>
       </aside>
-    </section>
+      </section>
+    </>
   );
 }
 
