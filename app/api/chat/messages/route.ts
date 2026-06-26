@@ -23,6 +23,11 @@ type ChatPostPayload = Partial<ChatMessage> & {
   user?: Partial<ChatSocketUser>;
 };
 
+type ChatDeletePayload = {
+  groupId?: string;
+  roomScope?: string;
+};
+
 function getPresenceStore() {
   globalChatStore.__forteTaskChatPresence ??= new Map<
     string,
@@ -402,4 +407,103 @@ export async function POST(request: NextRequest) {
   }
 
   return NextResponse.json({ saved: true });
+}
+
+export async function DELETE(request: NextRequest) {
+  const session = await verifySession();
+  const payload = (await request.json()) as ChatDeletePayload;
+
+  if (!payload.groupId || !payload.roomScope) {
+    return NextResponse.json(
+      { error: "Grupo inválido." },
+      { status: 400 }
+    );
+  }
+
+  const group = await db.chatGroup.findFirst({
+    where: {
+      id: payload.groupId,
+      roomScope: payload.roomScope,
+      members: {
+        some: {
+          userId: session.userId,
+        },
+      },
+    },
+    include: {
+      members: {
+        select: {
+          userId: true,
+        },
+      },
+    },
+  });
+
+  if (!group) {
+    return NextResponse.json(
+      { error: "Grupo não encontrado." },
+      { status: 404 }
+    );
+  }
+
+  if (group.createdByUserId === session.userId) {
+    await db.chatGroup.delete({
+      where: {
+        id: group.id,
+      },
+    });
+
+    publishEvent(getGroupsRoomId(group.roomScope), {
+      type: "chat:group:delete",
+      groupId: group.id,
+      roomScope: group.roomScope,
+    });
+
+    return NextResponse.json({ deleted: true });
+  }
+
+  await db.chatGroupMember.delete({
+    where: {
+      groupId_userId: {
+        groupId: group.id,
+        userId: session.userId,
+      },
+    },
+  });
+
+  const nextGroup = await db.chatGroup.findUnique({
+    where: {
+      id: group.id,
+    },
+    include: {
+      members: {
+        select: {
+          userId: true,
+        },
+      },
+    },
+  });
+
+  if (!nextGroup || !nextGroup.members.length) {
+    await db.chatGroup.delete({
+      where: {
+        id: group.id,
+      },
+    });
+
+    publishEvent(getGroupsRoomId(group.roomScope), {
+      type: "chat:group:delete",
+      groupId: group.id,
+      roomScope: group.roomScope,
+    });
+
+    return NextResponse.json({ deleted: true });
+  }
+
+  publishEvent(getGroupsRoomId(nextGroup.roomScope), {
+    type: "chat:group",
+    group: toChatGroup(nextGroup),
+  });
+
+  return NextResponse.json({ left: true });
 }
