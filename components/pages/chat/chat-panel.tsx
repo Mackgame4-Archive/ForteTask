@@ -1371,7 +1371,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   useEffect(() => {
     localStreamRef.current = localStream;
 
-    if (localVideoRef.current) {
+    if (localVideoRef.current && localVideoRef.current.srcObject !== localStream) {
       localVideoRef.current.srcObject = localStream;
     }
   }, [localStream]);
@@ -1380,17 +1380,13 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     for (const [memberId, stream] of Object.entries(remoteStreamsByUserId)) {
       const video = remoteVideoRefs.current[Number(memberId)];
 
-      if (video) {
+      if (video && video.srcObject !== stream) {
         video.srcObject = stream;
       }
-    }
-  }, [remoteStreamsByUserId]);
 
-  useEffect(() => {
-    for (const [memberId, stream] of Object.entries(remoteStreamsByUserId)) {
       const audio = remoteAudioRefs.current[Number(memberId)];
 
-      if (audio) {
+      if (audio && audio.srcObject !== stream) {
         audio.srcObject = stream;
       }
     }

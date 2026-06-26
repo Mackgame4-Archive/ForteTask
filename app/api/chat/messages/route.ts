@@ -3,6 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { verifySession } from "@/lib/auth/session";
 import { db } from "@/lib/db";
 import type {
+  ChatCallKind,
   ChatCallSignal,
   ChatGroup,
   ChatMessage,
@@ -10,9 +11,15 @@ import type {
   ChatSocketUser,
 } from "@/lib/utils/sockets";
 
+type CallPresenceEntry = {
+  user: ChatSocketUser;
+  kind: ChatCallKind;
+};
+
 const globalChatStore = globalThis as typeof globalThis & {
   __forteTaskChatPresence?: Map<string, Map<number, ChatSocketUser>>;
   __forteTaskChatSubscribers?: Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>;
+  __forteTaskCallPresence?: Map<string, Map<string, Map<number, CallPresenceEntry>>>;
 };
 
 type ChatPostPayload = Partial<ChatMessage> & {
@@ -21,6 +28,10 @@ type ChatPostPayload = Partial<ChatMessage> & {
   signal?: Partial<ChatCallSignal>;
   type?: ChatSocketEvent["type"];
   user?: Partial<ChatSocketUser>;
+  roomScope?: string;
+  conversationKey?: string;
+  present?: boolean;
+  kind?: ChatCallKind;
 };
 
 type ChatDeletePayload = {
@@ -44,6 +55,25 @@ function getSubscriberStore() {
   >();
 
   return globalChatStore.__forteTaskChatSubscribers;
+}
+
+function getCallPresenceStore() {
+  globalChatStore.__forteTaskCallPresence ??= new Map<
+    string,
+    Map<string, Map<number, CallPresenceEntry>>
+  >();
+
+  return globalChatStore.__forteTaskCallPresence;
+}
+
+function getCallsPresenceRoomId(roomScope: string) {
+  return `${roomScope}:calls-presence`;
+}
+
+function getCallScopeFromRoomId(roomId: string) {
+  return roomId.endsWith(":calls-presence")
+    ? roomId.slice(0, -":calls-presence".length)
+    : null;
 }
 
 const sseEncoder = new TextEncoder();
@@ -190,6 +220,25 @@ export async function GET(request: NextRequest) {
               }));
             }
           }
+
+          const callScope = getCallScopeFromRoomId(roomId);
+
+          if (callScope) {
+            const scopePresence = getCallPresenceStore().get(callScope);
+
+            for (const [conversationKey, entries] of scopePresence ?? []) {
+              for (const entry of entries.values()) {
+                controller.enqueue(encodeSseEvent({
+                  type: "chat:call-presence",
+                  roomScope: callScope,
+                  conversationKey,
+                  user: entry.user,
+                  present: true,
+                  kind: entry.kind,
+                }));
+              }
+            }
+          }
         })();
 
         request.signal.addEventListener("abort", () => {
@@ -281,6 +330,65 @@ export async function POST(request: NextRequest) {
       type: presenceType,
       roomId: payload.roomId,
       user: presenceUser as ChatSocketUser,
+    });
+
+    return NextResponse.json({ sent: true });
+  }
+
+  if (payload.type === "chat:call-presence") {
+    const callPresenceUser = payload.user;
+
+    if (
+      !payload.roomScope ||
+      !payload.conversationKey ||
+      !callPresenceUser ||
+      callPresenceUser.id !== session.userId ||
+      !callPresenceUser.name ||
+      !callPresenceUser.email ||
+      (payload.kind !== "audio" && payload.kind !== "video")
+    ) {
+      return NextResponse.json(
+        { error: "Presenca de chamada invalida." },
+        { status: 400 }
+      );
+    }
+
+    const store = getCallPresenceStore();
+    const scopePresence =
+      store.get(payload.roomScope) ?? new Map<string, Map<number, CallPresenceEntry>>();
+    const conversationPresence =
+      scopePresence.get(payload.conversationKey) ?? new Map<number, CallPresenceEntry>();
+
+    if (payload.present) {
+      conversationPresence.set(callPresenceUser.id, {
+        user: callPresenceUser as ChatSocketUser,
+        kind: payload.kind,
+      });
+      scopePresence.set(payload.conversationKey, conversationPresence);
+      store.set(payload.roomScope, scopePresence);
+    } else {
+      conversationPresence.delete(callPresenceUser.id);
+
+      if (conversationPresence.size) {
+        scopePresence.set(payload.conversationKey, conversationPresence);
+      } else {
+        scopePresence.delete(payload.conversationKey);
+      }
+
+      if (scopePresence.size) {
+        store.set(payload.roomScope, scopePresence);
+      } else {
+        store.delete(payload.roomScope);
+      }
+    }
+
+    publishEvent(getCallsPresenceRoomId(payload.roomScope), {
+      type: "chat:call-presence",
+      roomScope: payload.roomScope,
+      conversationKey: payload.conversationKey,
+      user: callPresenceUser as ChatSocketUser,
+      present: Boolean(payload.present),
+      kind: payload.kind,
     });
 
     return NextResponse.json({ sent: true });

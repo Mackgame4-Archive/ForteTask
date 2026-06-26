@@ -183,14 +183,17 @@ function CallScreen({
                       remoteVideoRefs.current[participant.id] = node;
                     }
 
-                    if (node) {
+                    // Only reassign when the stream actually changes — assigning
+                    // srcObject every render restarts the element and makes the
+                    // video flicker / drop frames.
+                    if (node && node.srcObject !== participant.stream) {
                       node.srcObject = participant.stream;
                     }
                   }}
                   audioRef={(node) => {
                     remoteAudioRefs.current[participant.id] = node;
 
-                    if (node) {
+                    if (node && node.srcObject !== participant.stream) {
                       node.srcObject = participant.stream;
                     }
                   }}

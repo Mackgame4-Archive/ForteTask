@@ -106,7 +106,17 @@ export type ChatSocketEvent =
       type: "chat:group:delete";
       groupId: string;
       roomScope: string;
+    }
+  | {
+      type: "chat:call-presence";
+      roomScope: string;
+      conversationKey: string;
+      user: ChatSocketUser;
+      present: boolean;
+      kind: ChatCallKind;
     };
+
+export type ChatCallPresence = Extract<ChatSocketEvent, { type: "chat:call-presence" }>;
 
 type ChatSocketOptions = {
   roomId: string;
@@ -117,6 +127,7 @@ type ChatSocketOptions = {
   onGroup?: (group: ChatGroup) => void;
   onGroupDelete?: (groupId: string, roomScope: string) => void;
   onPresenceChange?: (user: ChatSocketUser, online: boolean) => void;
+  onCallPresence?: (presence: ChatCallPresence) => void;
   onSignal?: (signal: ChatCallSignal) => void;
   onStatusChange?: (status: ChatSocketStatus) => void;
 };
@@ -127,6 +138,7 @@ type ChatSocketConnection = {
   sendGroup: (group: ChatGroup) => void;
   sendGroupDelete: (groupId: string, roomScope: string) => void;
   sendSignal: (signal: ChatCallSignal) => void;
+  sendCallPresence: (presence: ChatCallPresence) => void;
 };
 
 const fallbackChannelName = "fortetask-chat";
@@ -141,7 +153,8 @@ function parseSocketEvent(value: string): ChatSocketEvent | null {
       event.type === "chat:message" ||
       event.type === "chat:signal" ||
       event.type === "chat:group" ||
-      event.type === "chat:group:delete"
+      event.type === "chat:group:delete" ||
+      event.type === "chat:call-presence"
     ) {
       return event as ChatSocketEvent;
     }
@@ -189,6 +202,7 @@ function connectChatSocket({
   onGroup,
   onGroupDelete,
   onPresenceChange,
+  onCallPresence,
   onSignal,
   onStatusChange,
 }: ChatSocketOptions): ChatSocketConnection {
@@ -232,6 +246,11 @@ function connectChatSocket({
 
     if (event.type === "chat:group:delete") {
       onGroupDelete?.(event.groupId, event.roomScope);
+      return;
+    }
+
+    if (event.type === "chat:call-presence") {
+      onCallPresence?.(event);
     }
   }
 
@@ -448,6 +467,25 @@ function connectChatSocket({
           "Content-Type": "application/json",
         },
         body: serializedEvent,
+      });
+    },
+    sendCallPresence: (presence) => {
+      const serializedEvent = JSON.stringify(presence);
+
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(serializedEvent);
+      } else {
+        fallbackChannel?.postMessage(presence);
+      }
+
+      // keepalive so a leave fired during unload still reaches the server.
+      void fetch("/api/chat/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: serializedEvent,
+        keepalive: true,
       });
     },
   };
