@@ -16,6 +16,9 @@ model User {
   uploadedTaskAttachments TaskAttachment[] @relation("TaskAttachmentUploadedBy")
   taskComments TaskComment[] @relation("TaskCommentAuthor")
   taskActivities TaskActivity[] @relation("TaskActivityActor")
+  chatMessages ChatMessage[]
+  chatGroupsCreated ChatGroup[] @relation("ChatGroupCreatedBy")
+  chatGroupMemberships ChatGroupMember[]
 
   @@map("user")
 }

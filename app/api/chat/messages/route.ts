@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { verifySession } from "@/lib/auth/session";
+import { db } from "@/lib/db";
 import type {
   ChatCallSignal,
   ChatGroup,
@@ -10,8 +11,6 @@ import type {
 } from "@/lib/utils/sockets";
 
 const globalChatStore = globalThis as typeof globalThis & {
-  __forteTaskChatGroups?: Map<string, Map<string, ChatGroup>>;
-  __forteTaskChatMessages?: Map<string, ChatMessage[]>;
   __forteTaskChatPresence?: Map<string, Map<number, ChatSocketUser>>;
   __forteTaskChatSubscribers?: Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>;
 };
@@ -23,22 +22,6 @@ type ChatPostPayload = Partial<ChatMessage> & {
   type?: ChatSocketEvent["type"];
   user?: Partial<ChatSocketUser>;
 };
-
-function getMessageStore() {
-  globalChatStore.__forteTaskChatMessages ??= new Map<string, ChatMessage[]>();
-
-  return globalChatStore.__forteTaskChatMessages;
-}
-
-function getGroupStore() {
-  globalChatStore.__forteTaskChatGroups ??= new Map<string, Map<string, ChatGroup>>();
-
-  return globalChatStore.__forteTaskChatGroups;
-}
-
-function getRoomMessages(roomId: string) {
-  return getMessageStore().get(roomId) ?? [];
-}
 
 function getPresenceStore() {
   globalChatStore.__forteTaskChatPresence ??= new Map<
@@ -84,6 +67,75 @@ function getGroupsRoomId(roomScope: string) {
   return `${roomScope}:groups`;
 }
 
+function toChatMessage(message: {
+  id: string;
+  roomId: string;
+  userId: number;
+  authorName: string;
+  authorEmail: string;
+  body: string;
+  createdAt: Date;
+}): ChatMessage {
+  return {
+    ...message,
+    createdAt: message.createdAt.toISOString(),
+  };
+}
+
+function toChatGroup(group: {
+  id: string;
+  roomScope: string;
+  name: string;
+  createdByUserId: number;
+  createdAt: Date;
+  members: {
+    userId: number;
+  }[];
+}): ChatGroup {
+  return {
+    id: group.id,
+    roomScope: group.roomScope,
+    name: group.name,
+    memberIds: group.members.map((member) => member.userId),
+    createdByUserId: group.createdByUserId,
+    createdAt: group.createdAt.toISOString(),
+  };
+}
+
+async function getRoomMessages(roomId: string) {
+  const messages = await db.chatMessage.findMany({
+    where: {
+      roomId,
+    },
+    orderBy: {
+      createdAt: "desc",
+    },
+    take: 100,
+  });
+
+  return messages.reverse().map(toChatMessage);
+}
+
+async function getRoomScopeGroups(roomScope: string) {
+  const groups = await db.chatGroup.findMany({
+    where: {
+      roomScope,
+    },
+    include: {
+      members: {
+        select: {
+          userId: true,
+        },
+      },
+    },
+    orderBy: {
+      name: "asc",
+    },
+  });
+
+  return groups.map(toChatGroup);
+}
+
 export async function GET(request: NextRequest) {
   await verifySession();
 
@@ -105,33 +157,35 @@ export async function GET(request: NextRequest) {
         roomSubscribers.add(controller);
         subscribers.set(roomId, roomSubscribers);
 
-        for (const message of getRoomMessages(roomId)) {
-          controller.enqueue(encodeSseEvent({
-            type: "chat:message",
-            message,
-          }));
-        }
-
-        for (const user of getPresenceStore().get(roomId)?.values() ?? []) {
-          controller.enqueue(encodeSseEvent({
-            type: "chat:join",
-            roomId,
-            user,
-          }));
-        }
-
-        for (const [roomScope, groups] of getGroupStore()) {
-          if (roomId !== getGroupsRoomId(roomScope)) {
-            continue;
-          }
-
-          for (const group of groups.values()) {
+        void (async () => {
+          for (const message of await getRoomMessages(roomId)) {
             controller.enqueue(encodeSseEvent({
-              type: "chat:group",
-              group,
+              type: "chat:message",
+              message,
             }));
           }
-        }
+
+          for (const user of getPresenceStore().get(roomId)?.values() ?? []) {
+            controller.enqueue(encodeSseEvent({
+              type: "chat:join",
+              roomId,
+              user,
+            }));
+          }
+
+          const roomScope = roomId.endsWith(":groups")
+            ? roomId.slice(0, -":groups".length)
+            : null;
+
+          if (roomScope) {
+            for (const group of await getRoomScopeGroups(roomScope)) {
+              controller.enqueue(encodeSseEvent({
+                type: "chat:group",
+                group,
+              }));
+            }
+          }
+        })();
 
         request.signal.addEventListener("abort", () => {
           clearInterval(heartbeat);
@@ -160,7 +214,7 @@ export async function GET(request: NextRequest) {
   }
 
   return NextResponse.json({
-    messages: getRoomMessages(roomId),
+    messages: await getRoomMessages(roomId),
   });
 }
 
@@ -241,19 +295,44 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const normalizedGroup: ChatGroup = {
-      id: group.id,
-      roomScope: group.roomScope,
-      name: group.name,
-      memberIds: Array.from(new Set([...group.memberIds, session.userId])),
-      createdByUserId: session.userId,
-      createdAt: group.createdAt ?? new Date().toISOString(),
-    };
-    const store = getGroupStore();
-    const scopeGroups = store.get(normalizedGroup.roomScope) ?? new Map<string, ChatGroup>();
+    const memberIds = Array.from(new Set([...group.memberIds, session.userId]));
+    const createdAt = group.createdAt ? new Date(group.createdAt) : new Date();
+    const savedGroup = await db.chatGroup.upsert({
+      where: {
+        id: group.id,
+      },
+      update: {
+        name: group.name,
+        members: {
+          createMany: {
+            data: memberIds.map((userId) => ({ userId })),
+            skipDuplicates: true,
+          },
+        },
+      },
+      create: {
+        id: group.id,
+        roomScope: group.roomScope,
+        name: group.name,
+        createdByUserId: session.userId,
+        createdAt,
+        members: {
+          createMany: {
+            data: memberIds.map((userId) => ({ userId })),
+            skipDuplicates: true,
+          },
+        },
+      },
+      include: {
+        members: {
+          select: {
+            userId: true,
+          },
+        },
+      },
+    });
+    const normalizedGroup = toChatGroup(savedGroup);
 
-    scopeGroups.set(normalizedGroup.id, normalizedGroup);
-    store.set(normalizedGroup.roomScope, scopeGroups);
     publishEvent(getGroupsRoomId(normalizedGroup.roomScope), {
       type: "chat:group",
       group: normalizedGroup,
@@ -299,20 +378,27 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const store = getMessageStore();
-  const messages = store.get(message.roomId) ?? [];
+  const chatMessage = message as ChatMessage;
 
-  if (!messages.some((currentMessage) => currentMessage.id === message.id)) {
-    const nextMessages = [
-      ...messages,
-      message as ChatMessage,
-    ].slice(-100);
+  try {
+    const savedMessage = await db.chatMessage.create({
+      data: {
+        id: chatMessage.id,
+        roomId: chatMessage.roomId,
+        userId: session.userId,
+        authorName: session.name.slice(0, 120),
+        authorEmail: session.email.slice(0, 255),
+        body: chatMessage.body.slice(0, 4000),
+        createdAt: new Date(chatMessage.createdAt),
+      },
+    });
 
-    store.set(message.roomId, nextMessages);
     publishEvent(message.roomId, {
       type: "chat:message",
-      message: message as ChatMessage,
+      message: toChatMessage(savedMessage),
     });
+  } catch {
+    return NextResponse.json({ saved: true });
   }
 
   return NextResponse.json({ saved: true });

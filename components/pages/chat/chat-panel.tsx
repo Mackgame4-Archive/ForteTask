@@ -42,6 +42,7 @@ import {
 } from "@/lib/utils/sockets";
 import {
   createCallId,
+  createChatLocalStream,
   createChatPeerCall,
   type ChatPeerCall,
 } from "@/lib/utils/webrtc";
@@ -63,9 +64,11 @@ type ChatPanelProps = {
 
 type ActiveCall = {
   callId: string;
+  conversationRoomId: string;
   conversationTitle: string;
   kind: ChatCallKind;
   memberIds: number[];
+  startedAt: number;
   status: "calling" | "connected" | "ringing";
 };
 
@@ -167,6 +170,14 @@ function getCallErrorMessage(error: unknown) {
   return error.message || "Nao foi possivel iniciar a chamada.";
 }
 
+function formatCallDuration(startedAt: number, endedAt = Date.now()) {
+  const totalSeconds = Math.max(0, Math.round((endedAt - startedAt) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
 function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   const [activeCall, setActiveCall] = useState<ActiveCall | null>(null);
   const [draft, setDraft] = useState("");
@@ -190,6 +201,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   const endActiveCallRef = useRef<() => void>(() => {});
   const connectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
   const groupsConnectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const presenceConnectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
   const seenMessageIdsRef = useRef(new Set<string>());
@@ -272,6 +284,27 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     }));
   }, []);
 
+  const postMessage = useCallback((message: ChatMessage) => {
+    appendMessage(message);
+    void fetch("/api/chat/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(message),
+    });
+  }, [appendMessage]);
+
+  const postCallSummary = useCallback((call: ActiveCall) => {
+    const message = createChatMessage({
+      body: `Chamada com ${call.conversationTitle}\nDuração ${formatCallDuration(call.startedAt)}`,
+      roomId: call.conversationRoomId,
+      user,
+    });
+
+    postMessage(message);
+  }, [postMessage, user]);
+
   function getCandidateKey(callId: string, memberId: number) {
     return `${callId}:${memberId}`;
   }
@@ -343,8 +376,13 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
       peerCall.close();
     }
 
+    for (const track of localStreamRef.current?.getTracks() ?? []) {
+      track.stop();
+    }
+
     callRefsRef.current = {};
     activeCallRef.current = null;
+    localStreamRef.current = null;
     setActiveCall(null);
     setLocalStream(null);
     setRemoteStreamsByUserId({});
@@ -364,10 +402,14 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
           })
         );
       }
+
+      if (currentCall.status === "connected") {
+        postCallSummary(currentCall);
+      }
     }
 
     clearActiveCall();
-  }, [clearActiveCall, createSignalBase, sendCallSignal, user.id]);
+  }, [clearActiveCall, createSignalBase, postCallSummary, sendCallSignal, user.id]);
 
   useEffect(() => {
     endActiveCallRef.current = () => endActiveCall();
@@ -384,9 +426,11 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     const memberIds = selectedConversation.memberIds;
     const nextCall: ActiveCall = {
       callId,
+      conversationRoomId: selectedConversation.roomId,
       conversationTitle: selectedConversation.title,
       kind,
       memberIds,
+      startedAt: Date.now(),
       status: "calling",
     };
 
@@ -394,9 +438,19 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     setActiveCall(nextCall);
 
     try {
+      const localMedia = await createChatLocalStream(kind);
+
+      localStreamRef.current = localMedia.stream;
+      setLocalStream(localMedia.stream);
+      if (localMedia.error) {
+        setPanelError(getCallErrorMessage(localMedia.error));
+      }
+
       for (const memberId of memberIds) {
         const peerCall = await createChatPeerCall({
           kind,
+          localMediaError: localMedia.error,
+          localStream: localMedia.stream,
           onIceCandidate: (candidate) => {
             sendCallSignal(
               createSignalBase({
@@ -414,18 +468,17 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
               [memberId]: stream,
             }));
           },
+          stopLocalStreamOnClose: false,
         });
         const description = await peerCall.createOffer();
 
         callRefsRef.current[memberId] = peerCall;
-        setLocalStream((currentStream) => currentStream ?? peerCall.localStream);
-        if (peerCall.localMediaError) {
-          setPanelError(getCallErrorMessage(peerCall.localMediaError));
-        }
         sendCallSignal(
           createSignalBase({
             type: "call:offer",
             callId,
+            conversationRoomId: selectedConversation.roomId,
+            conversationTitle: selectedConversation.title,
             fromUserId: user.id,
             toUserId: memberId,
             fromName: user.name,
@@ -443,13 +496,22 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   const answerIncomingCall = useCallback(
     async (signal: Extract<ChatCallSignal, { type: "call:offer" }>) => {
       endActiveCall(false);
-      setSelectedConversationId(getPrivateConversationId(signal.fromUserId));
+      const incomingConversation =
+        conversations.find((conversation) => conversation.roomId === signal.conversationRoomId) ??
+        conversations.find((conversation) => conversation.id === getPrivateConversationId(signal.fromUserId));
+
+      if (incomingConversation) {
+        setSelectedConversationId(incomingConversation.id);
+      }
 
       const nextCall: ActiveCall = {
         callId: signal.callId,
-        conversationTitle: signal.fromName,
+        conversationRoomId:
+          signal.conversationRoomId ?? getPrivateRoomId(roomScope, user.id, signal.fromUserId),
+        conversationTitle: signal.conversationTitle ?? signal.fromName,
         kind: signal.kind,
         memberIds: [signal.fromUserId],
+        startedAt: Date.now(),
         status: "ringing",
       };
 
@@ -506,9 +568,11 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     },
     [
       clearActiveCall,
+      conversations,
       createSignalBase,
       endActiveCall,
       flushIceCandidates,
+      roomScope,
       sendCallSignal,
       user.id,
     ]
@@ -737,6 +801,8 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   }, [activeCall]);
 
   useEffect(() => {
+    localStreamRef.current = localStream;
+
     if (localVideoRef.current) {
       localVideoRef.current.srcObject = localStream;
     }
@@ -796,6 +862,9 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
                 key={memberId}
                 ref={(node) => {
                   remoteVideoRefs.current[memberId] = node;
+                  if (node) {
+                    node.srcObject = remoteStreamsByUserId[memberId] ?? null;
+                  }
                 }}
                 autoPlay
                 playsInline
@@ -803,7 +872,12 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
               />
             ))}
             <video
-              ref={localVideoRef}
+              ref={(node) => {
+                localVideoRef.current = node;
+                if (node) {
+                  node.srcObject = localStream;
+                }
+              }}
               autoPlay
               muted
               playsInline
@@ -816,7 +890,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
         className: "w-[min(42rem,calc(100vw-2rem))]",
       }
     );
-  }, [activeCall, callStatusLabel, remoteStreams, screenPopup]);
+  }, [activeCall, callStatusLabel, localStream, remoteStreams, remoteStreamsByUserId, screenPopup]);
 
   function sendMessage() {
     const body = draft.trim();

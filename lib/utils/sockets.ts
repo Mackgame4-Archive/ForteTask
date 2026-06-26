@@ -38,6 +38,8 @@ export type ChatCallSignal =
       fromUserId: number;
       toUserId: number;
       fromName: string;
+      conversationRoomId?: string;
+      conversationTitle?: string;
       description: RTCSessionDescriptionInit;
       kind: ChatCallKind;
       createdAt: string;
@@ -353,10 +355,10 @@ function connectChatSocket({
 
       if (socket?.readyState === WebSocket.OPEN) {
         socket.send(serializedEvent);
-        return;
+      } else {
+        fallbackChannel?.postMessage(event);
       }
 
-      fallbackChannel?.postMessage(event);
       void fetch("/api/chat/messages", {
         method: "POST",
         headers: {
@@ -374,10 +376,10 @@ function connectChatSocket({
 
       if (socket?.readyState === WebSocket.OPEN) {
         socket.send(serializedEvent);
-        return;
+      } else {
+        fallbackChannel?.postMessage(event);
       }
 
-      fallbackChannel?.postMessage(event);
       void fetch("/api/chat/messages", {
         method: "POST",
         headers: {

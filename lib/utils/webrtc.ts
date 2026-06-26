@@ -7,8 +7,11 @@ export type { ChatCallKind, ChatCallSignal } from "@/lib/utils/sockets";
 type ChatPeerCallOptions = {
   iceServers?: RTCIceServer[];
   kind: ChatCallKind;
+  localMediaError?: unknown;
+  localStream?: MediaStream | null;
   onIceCandidate?: (candidate: RTCIceCandidate) => void;
   onRemoteStream?: (stream: MediaStream) => void;
+  stopLocalStreamOnClose?: boolean;
 };
 
 export type ChatPeerCall = {
@@ -43,11 +46,14 @@ function createCallId() {
 async function createChatPeerCall({
   iceServers = [{ urls: "stun:stun.l.google.com:19302" }],
   kind,
+  localMediaError: providedLocalMediaError,
+  localStream: providedLocalStream,
   onIceCandidate,
   onRemoteStream,
+  stopLocalStreamOnClose = true,
 }: ChatPeerCallOptions): Promise<ChatPeerCall> {
-  let localMediaError: unknown = null;
-  let localStream: MediaStream | null = null;
+  let localMediaError: unknown = providedLocalMediaError ?? null;
+  let localStream: MediaStream | null = providedLocalStream ?? null;
 
   if (typeof RTCPeerConnection === "undefined") {
     throw createCallError(
@@ -58,22 +64,11 @@ async function createChatPeerCall({
 
   const peerConnection = new RTCPeerConnection({ iceServers });
 
-  try {
-    if (!navigator.mediaDevices?.getUserMedia) {
-      throw createCallError(
-        typeof window !== "undefined" && !window.isSecureContext
-          ? "SecurityError"
-          : "NotSupportedError",
-        "Chamadas precisam de HTTPS ou localhost."
-      );
-    }
+  if (providedLocalStream === undefined) {
+    const localMedia = await createChatLocalStream(kind);
 
-    localStream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: kind === "video",
-    });
-  } catch (error) {
-    localMediaError = error;
+    localMediaError = localMedia.error;
+    localStream = localMedia.stream;
   }
 
   const audioTracks = localStream?.getAudioTracks() ?? [];
@@ -122,8 +117,10 @@ async function createChatPeerCall({
     close: () => {
       peerConnection.close();
 
-      for (const track of localStream?.getTracks() ?? []) {
-        track.stop();
+      if (stopLocalStreamOnClose) {
+        for (const track of localStream?.getTracks() ?? []) {
+          track.stop();
+        }
       }
     },
     createOffer: async () => {
@@ -140,4 +137,30 @@ async function createChatPeerCall({
   };
 }
 
-export { createCallId, createChatPeerCall };
+async function createChatLocalStream(kind: ChatCallKind) {
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw createCallError(
+        typeof window !== "undefined" && !window.isSecureContext
+          ? "SecurityError"
+          : "NotSupportedError",
+        "Chamadas precisam de HTTPS ou localhost."
+      );
+    }
+
+    return {
+      error: null,
+      stream: await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: kind === "video",
+      }),
+    };
+  } catch (error) {
+    return {
+      error,
+      stream: null,
+    };
+  }
+}
+
+export { createCallId, createChatLocalStream, createChatPeerCall };
