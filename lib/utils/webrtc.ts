@@ -9,6 +9,7 @@ type ChatPeerCallOptions = {
   kind: ChatCallKind;
   localMediaError?: unknown;
   localStream?: MediaStream | null;
+  onConnectionLost?: () => void;
   onIceCandidate?: (candidate: RTCIceCandidate) => void;
   onRemoteStream?: (stream: MediaStream) => void;
   stopLocalStreamOnClose?: boolean;
@@ -48,10 +49,12 @@ async function createChatPeerCall({
   kind,
   localMediaError: providedLocalMediaError,
   localStream: providedLocalStream,
+  onConnectionLost,
   onIceCandidate,
   onRemoteStream,
   stopLocalStreamOnClose = true,
 }: ChatPeerCallOptions): Promise<ChatPeerCall> {
+  let closedByUs = false;
   let localMediaError: unknown = providedLocalMediaError ?? null;
   let localStream: MediaStream | null = providedLocalStream ?? null;
 
@@ -102,6 +105,22 @@ async function createChatPeerCall({
     }
   });
 
+  const handleConnectionState = () => {
+    if (closedByUs) {
+      return;
+    }
+
+    if (
+      peerConnection.connectionState === "failed" ||
+      peerConnection.iceConnectionState === "failed"
+    ) {
+      onConnectionLost?.();
+    }
+  };
+
+  peerConnection.addEventListener("connectionstatechange", handleConnectionState);
+  peerConnection.addEventListener("iceconnectionstatechange", handleConnectionState);
+
   return {
     addIceCandidate: (candidate) =>
       peerConnection.addIceCandidate(new RTCIceCandidate(candidate)),
@@ -115,6 +134,7 @@ async function createChatPeerCall({
       return answer;
     },
     close: () => {
+      closedByUs = true;
       peerConnection.close();
 
       if (stopLocalStreamOnClose) {

@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 
+import { CallScreen } from "@/components/pages/chat/call-screen";
 import { MessageBubble } from "@/components/pages/chat/message-bubble";
 import { useScreenPopup } from "@/components/screen-popup";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -203,6 +204,10 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   const [messagesByRoom, setMessagesByRoom] = useState<Record<string, ChatMessage[]>>({});
   const [onlineMemberIds, setOnlineMemberIds] = useState<Set<number>>(new Set());
   const [remoteStreamsByUserId, setRemoteStreamsByUserId] = useState<Record<number, MediaStream>>({});
+  const [micEnabled, setMicEnabled] = useState(true);
+  const [cameraEnabled, setCameraEnabled] = useState(true);
+  const [callChatOpen, setCallChatOpen] = useState(false);
+  const [callElapsedLabel, setCallElapsedLabel] = useState("");
   const [selectedConversationId, setSelectedConversationId] = useState(
     members[0] ? getPrivateConversationId(members[0].id) : null
   );
@@ -212,6 +217,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   const callRefsRef = useRef<Record<number, ChatPeerCall>>({});
   const callRingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const endActiveCallRef = useRef<() => void>(() => {});
+  const removePeerRef = useRef<(memberId: number) => void>(() => {});
   const incomingCallTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const incomingRingRef = useRef<ReturnType<typeof playIncomingCallLoop> | null>(null);
   const connectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
@@ -227,6 +233,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     Record<string, Extract<ChatCallSignal, { type: "call:offer" }>[]>
   >({});
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const remoteAudioRefs = useRef<Record<number, HTMLAudioElement | null>>({});
   const remoteVideoRefs = useRef<Record<number, HTMLVideoElement | null>>({});
   const screenPopup = useScreenPopup();
   const conversations = useMemo<ChatConversation[]>(() => {
@@ -293,6 +300,59 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     })),
     [remoteStreamsByUserId]
   );
+  const callParticipants = useMemo(() => {
+    if (!activeCall) {
+      return [];
+    }
+
+    const memberLookup = new Map(members.map((member) => [member.id, member]));
+
+    return [
+      { id: user.id, name: user.name, self: true, stream: localStream },
+      ...activeCall.memberIds.map((memberId) => ({
+        id: memberId,
+        name: memberLookup.get(memberId)?.name ?? `Utilizador ${memberId}`,
+        self: false,
+        stream: remoteStreamsByUserId[memberId] ?? null,
+      })),
+    ];
+  }, [activeCall, localStream, members, remoteStreamsByUserId, user.id, user.name]);
+  const callMessages = useMemo(
+    () => (activeCall ? messagesByRoom[activeCall.conversationRoomId] ?? [] : []),
+    [activeCall, messagesByRoom]
+  );
+
+  const toggleMic = useCallback(() => {
+    const tracks = localStreamRef.current?.getAudioTracks() ?? [];
+
+    if (!tracks.length) {
+      return;
+    }
+
+    const nextEnabled = !tracks.some((track) => track.enabled);
+
+    for (const track of tracks) {
+      track.enabled = nextEnabled;
+    }
+
+    setMicEnabled(nextEnabled);
+  }, []);
+
+  const toggleCamera = useCallback(() => {
+    const tracks = localStreamRef.current?.getVideoTracks() ?? [];
+
+    if (!tracks.length) {
+      return;
+    }
+
+    const nextEnabled = !tracks.some((track) => track.enabled);
+
+    for (const track of tracks) {
+      track.enabled = nextEnabled;
+    }
+
+    setCameraEnabled(nextEnabled);
+  }, []);
 
   const appendMessage = useCallback((message: ChatMessage) => {
     if (seenMessageIdsRef.current.has(message.id)) {
@@ -484,6 +544,57 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     setRemoteStreamsByUserId({});
   }, [clearCallRingTimeout, stopIncomingRing, stopOutgoingRing]);
 
+  const removePeer = useCallback((memberId: number) => {
+    const peerCall = callRefsRef.current[memberId];
+
+    if (peerCall) {
+      delete callRefsRef.current[memberId];
+      peerCall.close();
+    }
+
+    const currentCall = activeCallRef.current;
+
+    if (currentCall) {
+      delete pendingIceCandidatesRef.current[getCandidateKey(currentCall.callId, memberId)];
+    }
+
+    delete remoteVideoRefs.current[memberId];
+    setRemoteStreamsByUserId((currentStreams) => {
+      if (!(memberId in currentStreams)) {
+        return currentStreams;
+      }
+
+      const nextStreams = { ...currentStreams };
+
+      delete nextStreams[memberId];
+
+      return nextStreams;
+    });
+
+    if (!currentCall) {
+      return;
+    }
+
+    const nextMemberIds = currentCall.memberIds.filter((id) => id !== memberId);
+
+    if (nextMemberIds.length === 0) {
+      if (currentCall.status === "connected") {
+        postCallSummary(currentCall);
+      }
+
+      playCallEndSound();
+      clearActiveCall();
+      return;
+    }
+
+    activeCallRef.current = { ...currentCall, memberIds: nextMemberIds };
+    setActiveCall(activeCallRef.current);
+  }, [clearActiveCall, postCallSummary]);
+
+  useEffect(() => {
+    removePeerRef.current = removePeer;
+  }, [removePeer]);
+
   const endActiveCall = useCallback((notify = true) => {
     const currentCall = activeCallRef.current;
 
@@ -519,6 +630,18 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   }, [endActiveCall]);
 
   useEffect(() => {
+    const handlePageHide = () => {
+      if (activeCallRef.current) {
+        endActiveCallRef.current();
+      }
+    };
+
+    window.addEventListener("pagehide", handlePageHide);
+
+    return () => window.removeEventListener("pagehide", handlePageHide);
+  }, []);
+
+  useEffect(() => {
     return () => {
       clearCallRingTimeout();
       stopIncomingRing();
@@ -547,6 +670,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
       kind: signal.kind,
       localMediaError: localMedia.error,
       localStream: localMedia.stream,
+      onConnectionLost: () => removePeerRef.current(signal.fromUserId),
       onIceCandidate: (candidate) => {
         sendCallSignal(
           createSignalBase({
@@ -612,6 +736,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
         kind,
         localMediaError: localMedia.error,
         localStream: localMedia.stream,
+        onConnectionLost: () => removePeerRef.current(memberId),
         onIceCandidate: (candidate) => {
           sendCallSignal(
             createSignalBase({
@@ -719,6 +844,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
           kind,
           localMediaError: localMedia.error,
           localStream: localMedia.stream,
+          onConnectionLost: () => removePeerRef.current(memberId),
           onIceCandidate: (candidate) => {
             sendCallSignal(
               createSignalBase({
@@ -1059,45 +1185,23 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
       }
 
       if (signal.type === "call:end") {
+        const currentCall = activeCallRef.current;
+
+        if (currentCall?.callId === signal.callId) {
+          // A participant left an active call we're in — drop just their tile.
+          // removePeer ends the whole call for us only once no one else remains.
+          removePeerRef.current(signal.fromUserId);
+          return;
+        }
+
+        // Otherwise this is a call we're only ringing on (caller cancelled /
+        // declined elsewhere) — dismiss the incoming prompt.
         screenPopup.hide(incomingCallPopupPosition);
         clearIncomingCallTimeout(signal.callId);
         delete pendingIncomingOffersRef.current[signal.callId];
         clearCallRingTimeout();
         stopIncomingRing();
         stopOutgoingRing();
-
-        const currentCall = activeCallRef.current;
-
-        if (currentCall?.callId === signal.callId) {
-          const participantIds = Array.from(new Set([
-            ...(signal.participantIds ?? []),
-            signal.fromUserId,
-            user.id,
-            ...currentCall.memberIds,
-          ]));
-
-          for (const memberId of participantIds) {
-            if (memberId === user.id || memberId === signal.fromUserId) {
-              continue;
-            }
-
-            sendCallSignal(
-              createSignalBase({
-                type: "call:end",
-                callId: signal.callId,
-                conversationRoomId: signal.conversationRoomId ?? currentCall.conversationRoomId,
-                conversationTitle: signal.conversationTitle ?? currentCall.conversationTitle,
-                fromUserId: user.id,
-                participantIds,
-                reason: signal.reason ?? "ended",
-                toUserId: memberId,
-              })
-            );
-          }
-
-          playCallEndSound();
-          clearActiveCall();
-        }
       }
     },
     [
