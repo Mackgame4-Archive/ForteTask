@@ -13,6 +13,7 @@ import {
 import {
   boardSchema,
   createColumnSchema,
+  createTaskCommentSchema,
   createTaskSchema,
   deleteColumnSchema,
   deleteTaskSchema,
@@ -31,6 +32,25 @@ function boardsRedirect(message: string, type: "error" | "saved" = "saved"): nev
 }
 
 const maxTaskAttachmentSize = 25 * 1024 * 1024;
+
+function taskActivityData({
+  taskId,
+  actorId,
+  type,
+  message,
+}: {
+  taskId: number;
+  actorId: number;
+  type: string;
+  message: string;
+}) {
+  return {
+    taskId,
+    actorId,
+    type,
+    message,
+  };
+}
 
 function boardTaskRedirectUrl({
   boardId,
@@ -952,35 +972,46 @@ export async function createTaskAction(formData: FormData) {
     }),
   ]);
 
-  await db.task.create({
-    data: {
-      tenantId: membership.tenantId,
-      columnId: column.id,
-      createdById: session.userId,
-      title: parsed.data.title,
-      description: parsed.data.description || null,
-      startDate: parsed.data.startDate ?? null,
-      dueDate: parsed.data.dueDate ?? null,
-      position: column._count.tasks,
-      ...(labels.length
-        ? {
-            labels: {
-              create: labels.map((label) => ({
-                boardLabelId: label.id,
-              })),
-            },
-          }
-        : {}),
-      ...(assigneeIds.length
-        ? {
-            assignees: {
-              create: assigneeIds.map((userId) => ({
-                userId,
-              })),
-            },
-          }
-        : {}),
-    },
+  await db.$transaction(async (tx) => {
+    const createdTask = await tx.task.create({
+      data: {
+        tenantId: membership.tenantId,
+        columnId: column.id,
+        createdById: session.userId,
+        title: parsed.data.title,
+        description: parsed.data.description || null,
+        startDate: parsed.data.startDate ?? null,
+        dueDate: parsed.data.dueDate ?? null,
+        position: column._count.tasks,
+        ...(labels.length
+          ? {
+              labels: {
+                create: labels.map((label) => ({
+                  boardLabelId: label.id,
+                })),
+              },
+            }
+          : {}),
+        ...(assigneeIds.length
+          ? {
+              assignees: {
+                create: assigneeIds.map((userId) => ({
+                  userId,
+                })),
+              },
+            }
+          : {}),
+      },
+    });
+
+    await tx.taskActivity.create({
+      data: taskActivityData({
+        taskId: createdTask.id,
+        actorId: session.userId,
+        type: "task.created",
+        message: "criou a tarefa",
+      }),
+    });
   });
 
   redirect(
@@ -1279,6 +1310,18 @@ export async function updateTaskAction(formData: FormData) {
         data: customFieldValues,
       });
     }
+
+    await tx.taskActivity.create({
+      data: taskActivityData({
+        taskId: task.id,
+        actorId: session.userId,
+        type: "task.updated",
+        message:
+          task.columnId !== targetColumn.id
+            ? "moveu a tarefa e atualizou os detalhes"
+            : "atualizou os detalhes da tarefa",
+      }),
+    });
   });
 
   redirect(
@@ -1286,6 +1329,69 @@ export async function updateTaskAction(formData: FormData) {
       boardId: taskBoardId,
       formData,
       message: "Tarefa atualizada.",
+    })
+  );
+}
+
+export async function createTaskCommentAction(formData: FormData) {
+  const session = await verifySession();
+
+  const parsed = createTaskCommentSchema.safeParse({
+    boardId: formData.get("boardId"),
+    taskId: formData.get("taskId"),
+    body: formData.get("body"),
+  });
+
+  if (!session.activeTenantId || !parsed.success) {
+    boardsRedirect("Não foi possível adicionar o comentário.", "error");
+  }
+
+  const membership = await db.tenantUser.findUnique({
+    where: {
+      userId_tenantId: {
+        userId: session.userId,
+        tenantId: session.activeTenantId,
+      },
+    },
+    select: {
+      tenantId: true,
+      tenant: {
+        select: {
+          deletedAt: true,
+        },
+      },
+    },
+  });
+
+  if (!membership || membership.tenant.deletedAt) {
+    boardsRedirect("Não tem acesso a esta organização.", "error");
+  }
+
+  const task = await findAccessibleTask({
+    boardId: parsed.data.boardId,
+    taskId: parsed.data.taskId,
+    tenantId: membership.tenantId,
+    userId: session.userId,
+    role: session.role,
+  });
+
+  if (!task) {
+    boardsRedirect("A tarefa não foi encontrada.", "error");
+  }
+
+  await db.taskComment.create({
+    data: {
+      taskId: task.id,
+      authorId: session.userId,
+      body: parsed.data.body,
+    },
+  });
+
+  redirect(
+    boardTaskRedirectUrl({
+      boardId: task.column?.boardId ?? parsed.data.boardId,
+      formData,
+      message: "Comentário adicionado.",
     })
   );
 }
@@ -1517,13 +1623,24 @@ export async function updateTaskDatesAction(formData: FormData) {
       return { error: "A data de início não pode ficar depois da data limite." };
     }
 
-    await db.task.update({
-      where: {
-        id: task.id,
-      },
-      data: {
-        startDate: nextStartDate,
-      },
+    await db.$transaction(async (tx) => {
+      await tx.task.update({
+        where: {
+          id: task.id,
+        },
+        data: {
+          startDate: nextStartDate,
+        },
+      });
+
+      await tx.taskActivity.create({
+        data: taskActivityData({
+          taskId: task.id,
+          actorId: session.userId,
+          type: "task.date.updated",
+          message: "alterou a data de início",
+        }),
+      });
     });
 
     return { saved: true };
@@ -1538,13 +1655,24 @@ export async function updateTaskDatesAction(formData: FormData) {
     return { error: "A data limite não pode ficar antes da data de início." };
   }
 
-  await db.task.update({
-    where: {
-      id: task.id,
-    },
-    data: {
-      dueDate: nextDueDate,
-    },
+  await db.$transaction(async (tx) => {
+    await tx.task.update({
+      where: {
+        id: task.id,
+      },
+      data: {
+        dueDate: nextDueDate,
+      },
+    });
+
+    await tx.taskActivity.create({
+      data: taskActivityData({
+        taskId: task.id,
+        actorId: session.userId,
+        type: "task.date.updated",
+        message: "alterou a data limite",
+      }),
+    });
   });
 
   return { saved: true };
@@ -1786,16 +1914,27 @@ export async function uploadTaskAttachmentAction(formData: FormData) {
     objectKey,
   });
 
-  await db.taskAttachment.create({
-    data: {
-      taskId: task.id,
-      uploadedById: session.userId,
-      bucket: taskAttachmentBucket,
-      objectKey,
-      fileName,
-      contentType,
-      size: file.size,
-    },
+  await db.$transaction(async (tx) => {
+    await tx.taskAttachment.create({
+      data: {
+        taskId: task.id,
+        uploadedById: session.userId,
+        bucket: taskAttachmentBucket,
+        objectKey,
+        fileName,
+        contentType,
+        size: file.size,
+      },
+    });
+
+    await tx.taskActivity.create({
+      data: taskActivityData({
+        taskId: task.id,
+        actorId: session.userId,
+        type: "task.attachment.created",
+        message: `adicionou o anexo ${fileName}`,
+      }),
+    });
   });
 
   redirect(
@@ -1863,6 +2002,7 @@ export async function deleteTaskAttachmentAction(formData: FormData) {
     select: {
       id: true,
       objectKey: true,
+      fileName: true,
     },
   });
 
@@ -1870,10 +2010,21 @@ export async function deleteTaskAttachmentAction(formData: FormData) {
     boardsRedirect("O anexo não foi encontrado.", "error");
   }
 
-  await db.taskAttachment.delete({
-    where: {
-      id: attachment.id,
-    },
+  await db.$transaction(async (tx) => {
+    await tx.taskAttachment.delete({
+      where: {
+        id: attachment.id,
+      },
+    });
+
+    await tx.taskActivity.create({
+      data: taskActivityData({
+        taskId: task.id,
+        actorId: session.userId,
+        type: "task.attachment.deleted",
+        message: `eliminou o anexo ${attachment.fileName}`,
+      }),
+    });
   });
   await deleteTaskAttachmentObject(attachment.objectKey);
 
@@ -1936,16 +2087,27 @@ export async function toggleTaskCompletedAction(formData: FormData) {
     return { error: "A tarefa não foi encontrada." };
   }
 
-  await db.task.update({
-    where: {
-      id: task.id,
-    },
-    data: {
-      completed: parsed.data.completed,
-      completedAt: parsed.data.completed
-        ? task.completedAt ?? new Date()
-        : null,
-    },
+  await db.$transaction(async (tx) => {
+    await tx.task.update({
+      where: {
+        id: task.id,
+      },
+      data: {
+        completed: parsed.data.completed,
+        completedAt: parsed.data.completed
+          ? task.completedAt ?? new Date()
+          : null,
+      },
+    });
+
+    await tx.taskActivity.create({
+      data: taskActivityData({
+        taskId: task.id,
+        actorId: session.userId,
+        type: parsed.data.completed ? "task.completed" : "task.reopened",
+        message: parsed.data.completed ? "concluiu a tarefa" : "reabriu a tarefa",
+      }),
+    });
   });
 
   return { saved: true, completed: parsed.data.completed };

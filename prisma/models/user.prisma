@@ -14,6 +14,8 @@ model User {
   tasks Task[] @relation("TaskCreatedBy")
   assignedTasks TaskAssignee[]
   uploadedTaskAttachments TaskAttachment[] @relation("TaskAttachmentUploadedBy")
+  taskComments TaskComment[] @relation("TaskCommentAuthor")
+  taskActivities TaskActivity[] @relation("TaskActivityActor")
 
   @@map("user")
 }

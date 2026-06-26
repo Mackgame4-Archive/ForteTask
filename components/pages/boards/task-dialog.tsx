@@ -18,6 +18,7 @@ import {
 } from "lucide-react"
 
 import {
+  createTaskCommentAction,
   deleteTaskAction,
   deleteTaskAttachmentAction,
   uploadTaskAttachmentAction,
@@ -57,7 +58,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { formatTimeInputValue } from "@/lib/utils/date"
+import { Textarea } from "@/components/ui/textarea"
+import { formatAppDate, formatTimeInputValue } from "@/lib/utils/date"
 import type { LucideIcon } from "lucide-react"
 
 export type TaskDialogTask = TaskCardTask & {
@@ -82,6 +84,28 @@ export type TaskDialogTask = TaskCardTask & {
     uploadedBy: {
       id: number
       name: string
+    } | null
+  }[]
+  comments: {
+    id: number
+    body: string
+    createdAt: Date
+    updatedAt: Date
+    author: {
+      id: number
+      name: string
+      email: string
+    } | null
+  }[]
+  activities: {
+    id: number
+    type: string
+    message: string
+    createdAt: Date
+    actor: {
+      id: number
+      name: string
+      email: string
     } | null
   }[]
 }
@@ -190,6 +214,10 @@ function formatFileSize(bytes: number) {
   return `${size >= 10 || unitIndex === 0 ? Math.round(size) : size.toFixed(1)} ${units[unitIndex]}`
 }
 
+function formatTimelineDate(date: Date) {
+  return formatAppDate(date, "dd MMM yyyy HH:mm")
+}
+
 export function TaskDialog({
   boardId,
   columnName,
@@ -224,6 +252,24 @@ export function TaskDialog({
   const customFieldValueById = new Map(
     task.customFieldValues.map((value) => [value.customFieldId, value])
   )
+  const timelineItems = [
+    ...task.comments.map((comment) => ({
+      kind: "comment" as const,
+      id: comment.id,
+      body: comment.body,
+      createdAt: comment.createdAt,
+      name: comment.author?.name ?? "Utilizador removido",
+      email: comment.author?.email,
+    })),
+    ...task.activities.map((activity) => ({
+      kind: "activity" as const,
+      id: activity.id,
+      message: activity.message,
+      createdAt: activity.createdAt,
+      name: activity.actor?.name ?? "Sistema",
+      email: activity.actor?.email,
+    })),
+  ].sort((first, second) => second.createdAt.getTime() - first.createdAt.getTime())
 
   function addSection(section: TaskSectionId) {
     setActiveSections((currentSections) =>
@@ -268,6 +314,14 @@ export function TaskDialog({
         <form
           id={`upload-task-attachment-${task.id}`}
           action={uploadTaskAttachmentAction}
+        >
+          <input type="hidden" name="boardId" value={boardId} />
+          <input type="hidden" name="taskId" value={task.id} />
+          <BoardRedirectInput />
+        </form>
+        <form
+          id={`create-task-comment-${task.id}`}
+          action={createTaskCommentAction}
         >
           <input type="hidden" name="boardId" value={boardId} />
           <input type="hidden" name="taskId" value={task.id} />
@@ -762,21 +816,64 @@ export function TaskDialog({
                   <MessageSquare className="size-5 text-muted-foreground" />
                   Comentários e atividades
                 </div>
-                <Button type="button" variant="outline" size="sm">
-                  Mostrar detalhes
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor={`task-comment-${task.id}`} className="sr-only">
+                  Escrever comentário
+                </Label>
+                <Textarea
+                  id={`task-comment-${task.id}`}
+                  name="body"
+                  form={`create-task-comment-${task.id}`}
+                  placeholder="Escrever um comentário..."
+                  maxLength={2000}
+                  className="min-h-20 bg-card"
+                />
+                <Button
+                  type="submit"
+                  form={`create-task-comment-${task.id}`}
+                  size="sm"
+                >
+                  Comentar
                 </Button>
               </div>
-              <Input readOnly value="" placeholder="Escrever um comentário..." />
-              <div className="flex gap-3 text-sm">
-                <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
-                  {getInitials(displayName)}
-                </span>
-                <p className="text-muted-foreground">
-                  <span className="font-semibold text-foreground">
-                    {displayName}
-                  </span>{" "}
-                  adicionou este cartão a {columnName}
-                </p>
+              <div className="space-y-4">
+                {timelineItems.length ? (
+                  timelineItems.map((item) => (
+                    <div key={`${item.kind}-${item.id}`} className="flex gap-3 text-sm">
+                      <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+                        {getInitials(item.name)}
+                      </span>
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <p className="text-xs text-muted-foreground">
+                          <span className="font-semibold text-foreground">
+                            {item.name}
+                          </span>{" "}
+                          {formatTimelineDate(item.createdAt)}
+                        </p>
+                        {item.kind === "comment" ? (
+                          <p className="whitespace-pre-wrap break-words rounded-none border border-border bg-card p-3">
+                            {item.body}
+                          </p>
+                        ) : (
+                          <p className="text-muted-foreground">{item.message}</p>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="flex gap-3 text-sm">
+                    <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+                      {getInitials(displayName)}
+                    </span>
+                    <p className="text-muted-foreground">
+                      <span className="font-semibold text-foreground">
+                        {displayName}
+                      </span>{" "}
+                      adicionou este cartão a {columnName}
+                    </p>
+                  </div>
+                )}
               </div>
             </aside>
           </div>

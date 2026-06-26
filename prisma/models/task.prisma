@@ -21,6 +21,8 @@ model Task {
   assignees TaskAssignee[]
   customFieldValues TaskCustomFieldValue[]
   attachments TaskAttachment[]
+  comments TaskComment[]
+  activities TaskActivity[]
 
   @@index([tenantId])
   @@index([columnId])
@@ -29,6 +31,38 @@ model Task {
   @@index([dueDate])
   @@index([completedAt])
   @@map("task")
+}
+
+model TaskComment {
+  id Int @id @default(autoincrement())
+  taskId Int @map("task_id")
+  authorId Int? @map("author_id")
+  body String @db.VarChar(2000)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  author User? @relation("TaskCommentAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([taskId])
+  @@index([authorId])
+  @@map("task_comment")
+}
+
+model TaskActivity {
+  id Int @id @default(autoincrement())
+  taskId Int @map("task_id")
+  actorId Int? @map("actor_id")
+  type String @db.VarChar(80)
+  message String @db.VarChar(500)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  actor User? @relation("TaskActivityActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([taskId])
+  @@index([actorId])
+  @@map("task_activity")
 }
 
 model TaskAttachment {

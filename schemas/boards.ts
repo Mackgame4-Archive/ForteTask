@@ -209,6 +209,12 @@ export const deleteTaskSchema = z.object({
   taskId: z.coerce.number().int().positive(),
 });
 
+export const createTaskCommentSchema = z.object({
+  boardId: z.coerce.number().int().positive(),
+  taskId: z.coerce.number().int().positive(),
+  body: z.string().trim().min(1).max(2000),
+});
+
 export const toggleTaskCompletedSchema = z.object({
   boardId: z.coerce.number().int().positive(),
   taskId: z.coerce.number().int().positive(),

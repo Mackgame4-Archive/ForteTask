@@ -350,6 +350,42 @@ export async function getBoardPageData(boardId: string) {
                     },
                   },
                 },
+                comments: {
+                  orderBy: {
+                    createdAt: "desc",
+                  },
+                  select: {
+                    id: true,
+                    body: true,
+                    createdAt: true,
+                    updatedAt: true,
+                    author: {
+                      select: {
+                        id: true,
+                        name: true,
+                        email: true,
+                      },
+                    },
+                  },
+                },
+                activities: {
+                  orderBy: {
+                    createdAt: "desc",
+                  },
+                  select: {
+                    id: true,
+                    type: true,
+                    message: true,
+                    createdAt: true,
+                    actor: {
+                      select: {
+                        id: true,
+                        name: true,
+                        email: true,
+                      },
+                    },
+                  },
+                },
               },
             },
           },
