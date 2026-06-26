@@ -91,6 +91,7 @@ function BoardCalendar({
             boardId={boardId}
             columnName={boardTask.column?.name ?? "Tarefa"}
             columnColor={boardTask.column?.color}
+            boardColumns={columns}
             task={boardTask.dialogTask}
             boardLabels={boardLabels}
             boardCustomFields={boardCustomFields}

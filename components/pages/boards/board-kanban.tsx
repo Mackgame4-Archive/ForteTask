@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useTransition } from "react"
-import { MoreHorizontal, Plus, Trash2 } from "lucide-react"
+import { MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react"
 
 import {
   createColumnAction,
@@ -9,6 +9,7 @@ import {
   deleteColumnAction,
   moveColumnAction,
   moveTaskAction,
+  updateColumnAction,
 } from "@/app/(root)/boards/actions"
 import { ColorPickerField } from "@/components/color-picker-field"
 import { DatePicker } from "@/components/date-picker"
@@ -125,7 +126,10 @@ function moveTaskBetweenColumns({
       : -1
     const nextTasks = [...withoutDraggedTask]
 
-    nextTasks.splice(insertAt >= 0 ? insertAt : nextTasks.length, 0, task)
+    nextTasks.splice(insertAt >= 0 ? insertAt : nextTasks.length, 0, {
+      ...task,
+      columnId: targetColumnId,
+    })
 
     return {
       ...column,
@@ -215,11 +219,17 @@ function swapTaskWithTarget({
       ...column,
       tasks: column.tasks.map((task) => {
         if (task.id === draggedItem.id) {
-          return targetItem
+          return {
+            ...targetItem,
+            columnId: sourceColumn.id,
+          }
         }
 
         if (task.id === targetItem.id) {
-          return draggedItem
+          return {
+            ...draggedItem,
+            columnId: targetColumn.id,
+          }
         }
 
         return task
@@ -405,6 +415,57 @@ function AddColumnSheet({ boardId }: { boardId: number }) {
   )
 }
 
+function EditColumnSheet({
+  boardId,
+  column,
+  onOpenChange,
+}: {
+  boardId: number
+  column: BoardColumn | null
+  onOpenChange: (open: boolean) => void
+}) {
+  return (
+    <Sheet open={Boolean(column)} onOpenChange={onOpenChange}>
+      <SheetContent>
+        <SheetHeader>
+          <SheetTitle>Editar coluna</SheetTitle>
+          <SheetDescription>
+            Altere o nome e a cor desta coluna.
+          </SheetDescription>
+        </SheetHeader>
+        {column ? (
+          <form action={updateColumnAction} className="space-y-4 p-4">
+            <input type="hidden" name="boardId" value={boardId} />
+            <input type="hidden" name="columnId" value={column.id} />
+            <div className="space-y-2">
+              <Label htmlFor={`column-name-edit-${column.id}`}>Nome</Label>
+              <Input
+                id={`column-name-edit-${column.id}`}
+                name="name"
+                defaultValue={column.name}
+                required
+                maxLength={120}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Cor</Label>
+              <ColorPickerField
+                name="color"
+                defaultValue={column.color}
+                swatches={["#facc15", "#22c55e", "#3b82f6"]}
+                disableTransparency
+              />
+            </div>
+            <Button type="submit" className="w-full">
+              Guardar coluna
+            </Button>
+          </form>
+        ) : null}
+      </SheetContent>
+    </Sheet>
+  )
+}
+
 export function BoardKanban({
   boardId,
   canManage,
@@ -418,7 +479,10 @@ export function BoardKanban({
   userEmail,
 }: BoardKanbanProps) {
   const [columns, setColumns] = useState(initialColumns)
+  const [editingColumnId, setEditingColumnId] = useState<number | null>(null)
   const [, startTransition] = useTransition()
+  const editingColumn =
+    columns.find((column) => column.id === editingColumnId) ?? null
 
   function persistMove(
     nextColumns: BoardColumn[],
@@ -502,6 +566,25 @@ export function BoardKanban({
     })
   }
 
+  function updateTaskCompleted(taskId: number, completed: boolean) {
+    setColumns((currentColumns) =>
+      currentColumns.map((column) => ({
+        ...column,
+        tasks: column.tasks.map((task) =>
+          task.id === taskId
+            ? {
+                ...task,
+                completed,
+                completedAt: completed
+                  ? task.completedAt ?? new Date()
+                  : null,
+              }
+            : task
+        ),
+      }))
+    )
+  }
+
   function dropColumn(
     columnId: number,
     reorder?: DropZoneReorderDetails,
@@ -535,27 +618,37 @@ export function BoardKanban({
   }
 
   return (
-    <DropZone<BoardDragPayload>
-      className="mx-auto flex w-max min-w-full max-w-7xl gap-4"
-      reorderable={columnsReorderable}
-      zoneId={boardId}
-      getPayloadZoneId={(payload) =>
-        payload.type === "board-column" ? payload.sourceBoardId : undefined
-      }
-      reorder={(payload) =>
-        payload.type === "board-column"
-          ? {
-              group: "columns",
-              orientation: "horizontal",
-            }
-          : null
-      }
-      onDropPayload={(payload, _event, reorder) => {
-        if (payload.type === "board-column") {
-          dropColumn(payload.columnId, reorder)
+    <>
+      <EditColumnSheet
+        boardId={boardId}
+        column={editingColumn}
+        onOpenChange={(open) => {
+          if (!open) {
+            setEditingColumnId(null)
+          }
+        }}
+      />
+      <DropZone<BoardDragPayload>
+        className="mx-auto flex w-max min-w-full max-w-7xl gap-4"
+        reorderable={columnsReorderable}
+        zoneId={boardId}
+        getPayloadZoneId={(payload) =>
+          payload.type === "board-column" ? payload.sourceBoardId : undefined
         }
-      }}
-    >
+        reorder={(payload) =>
+          payload.type === "board-column"
+            ? {
+                group: "columns",
+                orientation: "horizontal",
+              }
+            : null
+        }
+        onDropPayload={(payload, _event, reorder) => {
+          if (payload.type === "board-column") {
+            dropColumn(payload.columnId, reorder)
+          }
+        }}
+      >
       {columns.map((column) => (
         <DraggableItem<ColumnDragPayload>
           key={column.id}
@@ -633,7 +726,13 @@ export function BoardKanban({
                       <MoreHorizontal />
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
+                      <DropdownMenuItem onClick={() => setEditingColumnId(column.id)}>
+                        <Pencil />
+                        Editar coluna
+                      </DropdownMenuItem>
                       <DropdownMenuItem
+                        nativeButton
+                        className="w-full"
                         render={
                           <button
                             type="submit"
@@ -692,12 +791,14 @@ export function BoardKanban({
                         boardId={boardId}
                         columnName={column.name}
                         columnColor={column.color}
+                        boardColumns={columns}
                         task={task}
                         boardLabels={boardLabels}
                         boardCustomFields={boardCustomFields}
                         boardMembers={boardMembers}
                         userName={userName}
                         userEmail={userEmail}
+                        onTaskCompletedChange={updateTaskCompleted}
                       />
                     </DropZone>
                   </DraggableItem>
@@ -745,6 +846,7 @@ export function BoardKanban({
         </DropZone>
       ) : null}
       <div aria-hidden className="w-4 shrink-0" />
-    </DropZone>
+      </DropZone>
+    </>
   )
 }

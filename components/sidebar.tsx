@@ -285,6 +285,7 @@ export function AppSidebar({ sessionPromise, tenantsPromise }: AppSidebarProps) 
             <SidebarMenu>
               {filteredMenu.map((item) => {
                 const Icon = item.icon;
+                const BadgeIcon = item.badge?.icon;
                 const hasSubmenu = Boolean(item.submenu?.length);
                 const isOpen =
                   Boolean(openSubmenus[item.name]) ||
@@ -311,7 +312,12 @@ export function AppSidebar({ sessionPromise, tenantsPromise }: AppSidebarProps) 
                             variant={item.badge.variant || "secondary"}
                             className="group-data-[collapsible=icon]:hidden"
                           >
-                            {item.badge.text}
+                            {BadgeIcon ? (
+                              <BadgeIcon
+                                data-icon={item.badge.text ? "inline-start" : undefined}
+                              />
+                            ) : null}
+                            {item.badge.text ? item.badge.text : null}
                           </Badge>
                         ) : null}
                         <ChevronRight className="ml-auto transition-transform group-aria-expanded/menu-button:rotate-90" />
@@ -330,7 +336,12 @@ export function AppSidebar({ sessionPromise, tenantsPromise }: AppSidebarProps) 
                             variant={item.badge.variant || "secondary"}
                             className="ml-auto group-data-[collapsible=icon]:hidden"
                           >
-                            {item.badge.text}
+                            {BadgeIcon ? (
+                              <BadgeIcon
+                                data-icon={item.badge.text ? "inline-start" : undefined}
+                              />
+                            ) : null}
+                            {item.badge.text ? item.badge.text : null}
                           </Badge>
                         ) : null}
                       </SidebarMenuButton>

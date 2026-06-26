@@ -43,7 +43,6 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Badge } from "@/components/ui/badge"
 import {
   Select,
   SelectContent,
@@ -57,6 +56,7 @@ import type { LucideIcon } from "lucide-react"
 
 export type TaskDialogTask = TaskCardTask & {
   id: number
+  columnId: number
   subTasks: {
     id: number
     title: string
@@ -73,6 +73,11 @@ type TaskDialogProps = {
   boardId: number
   columnName: string
   columnColor?: string
+  boardColumns: {
+    id: number
+    name: string
+    color: string
+  }[]
   task: TaskDialogTask
   boardLabels: {
     id: number
@@ -92,6 +97,7 @@ type TaskDialogProps = {
   }[]
   userName?: string | null
   userEmail: string
+  onTaskCompletedChange?: (taskId: number, completed: boolean) => void
   trigger?: ReactNode
 }
 
@@ -147,16 +153,23 @@ export function TaskDialog({
   boardId,
   columnName,
   columnColor,
+  boardColumns,
   task,
   boardLabels,
   boardCustomFields,
   boardMembers,
   userName,
   userEmail,
+  onTaskCompletedChange,
   trigger,
 }: TaskDialogProps) {
   const displayName = userName || userEmail
+  const [open, setOpen] = useState(false)
   const [title, setTitle] = useState(task.title)
+  const [selectedColumnId, setSelectedColumnId] = useState(String(task.columnId))
+  const selectedColumn = boardColumns.find(
+    (column) => String(column.id) === selectedColumnId
+  )
   const [activeSections, setActiveSections] = useState<TaskSectionId[]>(
     [
       task.assignees.length ? "members" : null,
@@ -185,12 +198,26 @@ export function TaskDialog({
   }
 
   return (
-    <Dialog>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        setSelectedColumnId(String(task.columnId))
+        setOpen(nextOpen)
+      }}
+    >
       <DialogTrigger
         nativeButton={false}
         render={<div className="block w-full" />}
       >
-        {trigger ?? <TaskCard task={task} />}
+        {trigger ?? (
+          <TaskCard
+            boardId={boardId}
+            task={task}
+            onCompletedChange={(completed) =>
+              onTaskCompletedChange?.(task.id, completed)
+            }
+          />
+        )}
       </DialogTrigger>
       <DialogContent
         className="max-h-[calc(100svh-2rem)] overflow-y-auto p-0 sm:max-w-5xl"
@@ -229,13 +256,51 @@ export function TaskDialog({
           })}
           <div className="border-b border-border bg-card px-6 pb-4">
             <header className="flex items-center justify-between gap-3">
-              <Badge
-                variant="secondary"
-                className="text-xs"
-                style={columnColor ? { borderLeft: `3px solid ${columnColor}` } : undefined}
+              <Label htmlFor={`task-column-edit-${task.id}`} className="sr-only">
+                Coluna
+              </Label>
+              <Select
+                key={`${task.id}-${task.columnId}-${open ? "open" : "closed"}`}
+                name="columnId"
+                value={selectedColumnId}
+                onValueChange={(value) => {
+                  if (value) {
+                    setSelectedColumnId(value)
+                  }
+                }}
               >
-                {columnName}
-              </Badge>
+                <SelectTrigger
+                  id={`task-column-edit-${task.id}`}
+                  size="sm"
+                  className="border-border bg-secondary text-secondary-foreground"
+                  style={
+                    selectedColumn?.color || columnColor
+                      ? { borderLeft: `3px solid ${selectedColumn?.color ?? columnColor}` }
+                      : undefined
+                  }
+                >
+                  <SelectValue placeholder={columnName}>
+                    {selectedColumn?.name ?? columnName}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent align="start">
+                  <SelectGroup>
+                    {boardColumns.map((column) => (
+                      <SelectItem
+                        key={column.id}
+                        value={String(column.id)}
+                        label={column.name}
+                      >
+                        <span
+                          className="size-2 shrink-0"
+                          style={{ backgroundColor: column.color }}
+                        />
+                        {column.name}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
               <div className="flex items-center gap-1">
                 <DropdownMenu>
                   <DropdownMenuTrigger

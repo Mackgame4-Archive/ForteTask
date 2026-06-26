@@ -1,23 +1,30 @@
 import {
     Ad,
     CalendarDays,
+    MessageCircle,
+    Bot,
+    ExternalLink,
     LayoutDashboard,
     Settings,
     ShoppingCart,
     SquareKanban,
     UsersRound,
 } from "lucide-react";
-import type { ComponentProps } from "react";
 import type { LucideIcon } from "lucide-react";
-import type { Badge } from "@/components/ui/badge";
 
-type BadgeVariant = ComponentProps<typeof Badge>["variant"];
+type BadgeVariant =
+    | "default"
+    | "secondary"
+    | "destructive"
+    | "outline"
+    | "ghost"
+    | "link";
 
 export interface MenuItem {
     name: string;
     href: string;
     icon?: LucideIcon;
-    badge?: { variant?: BadgeVariant; text: string };
+    badge?: { variant?: BadgeVariant; text?: string; icon?: LucideIcon };
     submenu?: MenuItem[];
 }
 
@@ -49,5 +56,7 @@ export default <MenuItem[]>[
         icon: UsersRound,
         submenu: [{ name: "Todos os membros", href: "/members" }],
     },
+    { name: "Chat", href: "/chat", icon: MessageCircle },
+    { name: "ForteAI", href: "/chat-ai", icon: Bot, badge: { variant: "secondary", icon: ExternalLink } },
     { name: "Definições", href: "/settings", icon: Settings },
 ];

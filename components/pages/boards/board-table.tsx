@@ -123,6 +123,7 @@ function BoardTable({
             boardId={boardId}
             columnName={column.name}
             columnColor={column.color}
+            boardColumns={columns}
             task={task}
             boardLabels={boardLabels}
             boardCustomFields={boardCustomFields}

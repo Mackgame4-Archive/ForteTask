@@ -408,7 +408,7 @@ function GanttTimeline<TItem extends GanttTimelineItem = GanttTimelineItem>({
                 <div
                   key={day.toISOString()}
                   className={cn(
-                    "px-2 py-2 text-center text-[11px] text-muted-foreground",
+                    "flex h-12 min-h-0 flex-col items-center justify-center px-2 text-center text-[11px] leading-tight text-muted-foreground",
                     isToday(day) && "bg-primary/10 text-foreground"
                   )}
                 >

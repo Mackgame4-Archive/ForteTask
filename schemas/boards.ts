@@ -127,17 +127,21 @@ export const updateBoardSchema = z
     message: "Enter a valid board name.",
   });
 
-export const createColumnSchema = z
-  .object({
-    boardId: z.coerce.number().int().positive(),
-    name: z.string().trim().min(1).max(120),
-    color: colorSchema.default("#3b82f6"),
-  })
+const columnSchema = z.object({
+  boardId: z.coerce.number().int().positive(),
+  name: z.string().trim().min(1).max(120),
+  color: colorSchema.default("#3b82f6"),
+});
+const columnTransform = (data: z.infer<typeof columnSchema>) => ({
+  boardId: data.boardId,
+  name: data.name,
+  slug: createSlug(data.name),
+  color: data.color,
+});
+
+export const createColumnSchema = columnSchema
   .transform((data) => ({
-    boardId: data.boardId,
-    name: data.name,
-    slug: createSlug(data.name),
-    color: data.color,
+    ...columnTransform(data),
   }))
   .refine((data) => data.slug.length > 0, {
     path: ["slug"],
@@ -148,6 +152,19 @@ export const deleteColumnSchema = z.object({
   boardId: z.coerce.number().int().positive(),
   columnId: z.coerce.number().int().positive(),
 });
+
+export const updateColumnSchema = columnSchema
+  .extend({
+    columnId: z.coerce.number().int().positive(),
+  })
+  .transform((data) => ({
+    ...columnTransform(data),
+    columnId: data.columnId,
+  }))
+  .refine((data) => data.slug.length > 0, {
+    path: ["slug"],
+    message: "Enter a valid column name.",
+  });
 
 export const createTaskSchema = z.object({
   boardId: z.coerce.number().int().positive(),
@@ -170,6 +187,7 @@ export const createTaskSchema = z.object({
 export const updateTaskSchema = z.object({
   boardId: z.coerce.number().int().positive(),
   taskId: z.coerce.number().int().positive(),
+  columnId: z.coerce.number().int().positive(),
   title: z.string().trim().min(1).max(255),
   description: z.string().trim().max(1000).optional(),
   completed: z.preprocess((value) => value === "true", z.boolean()),
@@ -191,6 +209,12 @@ export const deleteTaskSchema = z.object({
   taskId: z.coerce.number().int().positive(),
 });
 
+export const toggleTaskCompletedSchema = z.object({
+  boardId: z.coerce.number().int().positive(),
+  taskId: z.coerce.number().int().positive(),
+  completed: z.preprocess((value) => value === "true", z.boolean()),
+});
+
 export const moveTaskSchema = z.object({
   boardId: z.coerce.number().int().positive(),
   taskId: z.coerce.number().int().positive(),
@@ -210,8 +234,10 @@ export type BoardInput = z.infer<typeof boardSchema>;
 export type UpdateBoardInput = z.infer<typeof updateBoardSchema>;
 export type CreateColumnInput = z.infer<typeof createColumnSchema>;
 export type DeleteColumnInput = z.infer<typeof deleteColumnSchema>;
+export type UpdateColumnInput = z.infer<typeof updateColumnSchema>;
 export type CreateTaskInput = z.infer<typeof createTaskSchema>;
 export type UpdateTaskInput = z.infer<typeof updateTaskSchema>;
 export type DeleteTaskInput = z.infer<typeof deleteTaskSchema>;
+export type ToggleTaskCompletedInput = z.infer<typeof toggleTaskCompletedSchema>;
 export type MoveTaskInput = z.infer<typeof moveTaskSchema>;
 export type MoveColumnInput = z.infer<typeof moveColumnSchema>;

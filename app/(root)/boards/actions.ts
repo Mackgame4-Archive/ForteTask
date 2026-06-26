@@ -12,7 +12,9 @@ import {
   deleteTaskSchema,
   moveColumnSchema,
   moveTaskSchema,
+  toggleTaskCompletedSchema,
   updateBoardSchema,
+  updateColumnSchema,
   updateTaskSchema,
 } from "@/schemas/boards";
 
@@ -173,8 +175,10 @@ async function findAccessibleTask({
     },
     select: {
       id: true,
+      columnId: true,
       completed: true,
       completedAt: true,
+      position: true,
       column: {
         select: {
           boardId: true,
@@ -690,6 +694,89 @@ export async function deleteColumnAction(formData: FormData) {
   redirect(`/boards/${column.boardId}?${params.toString()}`);
 }
 
+export async function updateColumnAction(formData: FormData) {
+  const session = await verifySession();
+
+  if (!canManageBoards(session.role)) {
+    boardsRedirect("Não tem permissão para editar colunas do quadro.", "error");
+  }
+
+  if (!session.activeTenantId) {
+    boardsRedirect("Selecione uma organização antes de editar uma coluna do quadro.", "error");
+  }
+
+  const parsed = updateColumnSchema.safeParse({
+    boardId: formData.get("boardId"),
+    columnId: formData.get("columnId"),
+    name: formData.get("name"),
+    color: formData.get("color"),
+  });
+
+  if (!parsed.success) {
+    boardsRedirect("Introduza um nome de coluna válido.", "error");
+  }
+
+  const membership = await db.tenantUser.findUnique({
+    where: {
+      userId_tenantId: {
+        userId: session.userId,
+        tenantId: session.activeTenantId,
+      },
+    },
+    select: {
+      tenantId: true,
+      tenant: {
+        select: {
+          deletedAt: true,
+        },
+      },
+    },
+  });
+
+  if (!membership || membership.tenant.deletedAt) {
+    boardsRedirect("Não tem acesso a esta organização.", "error");
+  }
+
+  const column = await db.boardColumn.findFirst({
+    where: {
+      id: parsed.data.columnId,
+      boardId: parsed.data.boardId,
+      board: {
+        tenantId: membership.tenantId,
+      },
+    },
+    select: {
+      id: true,
+      boardId: true,
+    },
+  });
+
+  if (!column) {
+    boardsRedirect("A coluna não foi encontrada.", "error");
+  }
+
+  try {
+    await db.boardColumn.update({
+      where: {
+        id: column.id,
+      },
+      data: {
+        name: parsed.data.name,
+        slug: parsed.data.slug,
+        color: parsed.data.color,
+      },
+    });
+  } catch {
+    const params = new URLSearchParams({
+      error: "Não foi possível atualizar a coluna. Pode já existir uma coluna com esse nome.",
+    });
+    redirect(`/boards/${column.boardId}?${params.toString()}`);
+  }
+
+  const params = new URLSearchParams({ saved: "Coluna atualizada." });
+  redirect(`/boards/${column.boardId}?${params.toString()}`);
+}
+
 export async function createTaskAction(formData: FormData) {
   const session = await verifySession();
 
@@ -851,6 +938,7 @@ export async function updateTaskAction(formData: FormData) {
   const parsed = updateTaskSchema.safeParse({
     boardId: formData.get("boardId"),
     taskId: formData.get("taskId"),
+    columnId: formData.get("columnId"),
     title: formData.get("title"),
     description: formData.get("description") || undefined,
     completed: formData.get("completed"),
@@ -901,7 +989,21 @@ export async function updateTaskAction(formData: FormData) {
   }
 
   const taskBoardId = task.column?.boardId ?? parsed.data.boardId;
-  const [labels, assigneeIds, currentSubTasks, customFields] = await Promise.all([
+  const [targetColumn, labels, assigneeIds, currentSubTasks, customFields] = await Promise.all([
+    db.boardColumn.findFirst({
+      where: {
+        id: parsed.data.columnId,
+        boardId: taskBoardId,
+      },
+      select: {
+        id: true,
+        _count: {
+          select: {
+            tasks: true,
+          },
+        },
+      },
+    }),
     parsed.data.labelIds.length
       ? db.boardLabel.findMany({
           where: {
@@ -941,6 +1043,11 @@ export async function updateTaskAction(formData: FormData) {
       },
     }),
   ]);
+
+  if (!targetColumn) {
+    boardsRedirect("Escolha uma coluna válida.", "error");
+  }
+
   const labelIds = labels.map((label) => label.id);
   const subTasks = parseSubTasks(formData);
   const currentSubTaskCompletion = new Map(
@@ -992,11 +1099,31 @@ export async function updateTaskAction(formData: FormData) {
   }
 
   await db.$transaction(async (tx) => {
+    if (task.columnId !== targetColumn.id) {
+      await tx.task.updateMany({
+        where: {
+          columnId: task.columnId,
+          position: {
+            gt: task.position,
+          },
+        },
+        data: {
+          position: {
+            decrement: 1,
+          },
+        },
+      });
+    }
+
     await tx.task.update({
       where: {
         id: task.id,
       },
       data: {
+        columnId: targetColumn.id,
+        ...(task.columnId !== targetColumn.id
+          ? { position: targetColumn._count.tasks }
+          : {}),
         title: parsed.data.title,
         description: parsed.data.description || null,
         completed: parsed.data.completed,
@@ -1407,4 +1534,69 @@ export async function deleteTaskAction(formData: FormData) {
 
   const params = new URLSearchParams({ saved: "Tarefa eliminada." });
   redirect(`/boards/${task.column?.boardId ?? parsed.data.boardId}?${params.toString()}`);
+}
+
+export async function toggleTaskCompletedAction(formData: FormData) {
+  const session = await verifySession();
+
+  if (!session.activeTenantId) {
+    return { error: "Selecione uma organização antes de editar uma tarefa." };
+  }
+
+  const parsed = toggleTaskCompletedSchema.safeParse({
+    boardId: formData.get("boardId"),
+    taskId: formData.get("taskId"),
+    completed: formData.get("completed"),
+  });
+
+  if (!parsed.success) {
+    return { error: "Não foi possível atualizar a tarefa." };
+  }
+
+  const membership = await db.tenantUser.findUnique({
+    where: {
+      userId_tenantId: {
+        userId: session.userId,
+        tenantId: session.activeTenantId,
+      },
+    },
+    select: {
+      tenantId: true,
+      tenant: {
+        select: {
+          deletedAt: true,
+        },
+      },
+    },
+  });
+
+  if (!membership || membership.tenant.deletedAt) {
+    return { error: "Não tem acesso a esta organização." };
+  }
+
+  const task = await findAccessibleTask({
+    boardId: parsed.data.boardId,
+    taskId: parsed.data.taskId,
+    tenantId: membership.tenantId,
+    userId: session.userId,
+    role: session.role,
+  });
+
+  if (!task) {
+    return { error: "A tarefa não foi encontrada." };
+  }
+
+  await db.task.update({
+    where: {
+      id: task.id,
+    },
+    data: {
+      completed: parsed.data.completed,
+      completedAt: parsed.data.completed
+        ? task.completedAt ?? new Date()
+        : null,
+    },
+  });
+
+  return { saved: true, completed: parsed.data.completed };
 }
