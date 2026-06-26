@@ -19,7 +19,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from
 
 import { CallScreen } from "@/components/pages/chat/call-screen";
 import { MessageBubble } from "@/components/pages/chat/message-bubble";
-import { useScreenPopup } from "@/components/screen-popup";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -46,6 +45,7 @@ import {
   connectChatSocket,
   createChatMessage,
   type ChatCallKind,
+  type ChatCallPresence,
   type ChatCallSignal,
   type ChatGroup,
   type ChatMessage,
@@ -84,6 +84,12 @@ type ActiveCall = {
   status: "calling" | "connected" | "ringing";
 };
 
+// Who is currently in a given conversation's call room, plus the call's kind.
+type CallPresence = {
+  kind: ChatCallKind;
+  users: ChatSocketUser[];
+};
+
 type OutgoingCallSignal =
   | Omit<Extract<ChatCallSignal, { type: "call:offer" }>, "createdAt" | "id" | "roomId">
   | Omit<Extract<ChatCallSignal, { type: "call:answer" }>, "createdAt" | "id" | "roomId">
@@ -110,8 +116,6 @@ type ChatConversation =
       group: ChatGroup;
     };
 
-const incomingCallPopupPosition = "bottom-right" as const;
-const callRingTimeoutMs = 40_000;
 
 function getInitials(name: string) {
   return (
@@ -148,6 +152,10 @@ function getGroupsRoomId(roomScope: string) {
 
 function getCallRoomId(roomScope: string, userId: number) {
   return `${roomScope}:calls:${userId}`;
+}
+
+function getCallsPresenceRoomId(roomScope: string) {
+  return `${roomScope}:calls-presence`;
 }
 
 function conversationIdToChatSlug(conversationId: string) {
@@ -225,6 +233,8 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   const [micEnabled, setMicEnabled] = useState(true);
   const [cameraEnabled, setCameraEnabled] = useState(true);
   const [callChatOpen, setCallChatOpen] = useState(false);
+  const [callPresenceByKey, setCallPresenceByKey] = useState<Record<string, CallPresence>>({});
+  const [declinedCallKeys, setDeclinedCallKeys] = useState<string[]>([]);
   const [, setCallTick] = useState(0);
   const [, startTransition] = useTransition();
   const router = useRouter();
@@ -247,27 +257,26 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   );
   const activeCallRef = useRef<ActiveCall | null>(null);
   const callConnectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
+  const callPresenceConnectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
   const callRefsRef = useRef<Record<number, ChatPeerCall>>({});
-  const callRingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const callPresenceByKeyRef = useRef<Record<string, CallPresence>>({});
   const endActiveCallRef = useRef<() => void>(() => {});
   const removePeerRef = useRef<(memberId: number) => void>(() => {});
-  const incomingCallTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-  const incomingRingRef = useRef<ReturnType<typeof playIncomingCallLoop> | null>(null);
+  const connectCallMemberRef = useRef<(memberId: number) => void>(() => {});
+  const joinCallRef = useRef<(conversation: ChatConversation) => void>(() => {});
+  const joiningRoomRef = useRef<string | null>(null);
+  const pendingCallKindRef = useRef<ChatCallKind>("audio");
   const connectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
   const groupsConnectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
+  const incomingRingRef = useRef<ReturnType<typeof playIncomingCallLoop> | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
-  const outgoingRingRef = useRef<ReturnType<typeof playIncomingCallLoop> | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const presenceConnectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
   const seenMessageIdsRef = useRef(new Set<string>());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const pendingIceCandidatesRef = useRef<Record<string, RTCIceCandidateInit[]>>({});
-  const pendingIncomingOffersRef = useRef<
-    Record<string, Extract<ChatCallSignal, { type: "call:offer" }>[]>
-  >({});
   const remoteAudioRefs = useRef<Record<number, HTMLAudioElement | null>>({});
   const remoteVideoRefs = useRef<Record<number, HTMLVideoElement | null>>({});
-  const screenPopup = useScreenPopup();
   const conversations = useMemo<ChatConversation[]>(() => {
     const privateConversations = members.map((member) => ({
       id: getPrivateConversationId(member.id),
@@ -294,13 +303,9 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   }, [groups, members, roomScope, user.id]);
   const selectedConversation =
     conversations.find((conversation) => conversation.id === selectedConversationId) ??
-    conversations[0] ??
     null;
   const roomId = selectedConversation?.roomId ?? null;
-  const messages = useMemo(
-    () => roomId ? messagesByRoom[roomId] ?? [] : [],
-    [messagesByRoom, roomId]
-  );
+  const messages = roomId ? messagesByRoom[roomId] ?? [] : [];
   const canSend = Boolean(roomId && draft.trim().length > 0);
   const selectedMemberOnline = Boolean(
     selectedConversation?.kind === "private" &&
@@ -340,6 +345,37 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     () => (activeCall ? messagesByRoom[activeCall.conversationRoomId] ?? [] : []),
     [activeCall, messagesByRoom]
   );
+  const selectedConversationHasCall = Boolean(
+    selectedConversation && callPresenceByKey[selectedConversation.roomId]?.users.length
+  );
+  // A call is "incoming" when one of our conversations has people in its call
+  // room, we're not in it, and we haven't declined it.
+  const incomingCall = ((): {
+    conversation: ChatConversation;
+    kind: ChatCallKind;
+    from: ChatSocketUser;
+    others: ChatSocketUser[];
+  } | null => {
+    if (activeCall) {
+      return null;
+    }
+
+    for (const conversation of conversations) {
+      if (declinedCallKeys.includes(conversation.roomId)) {
+        continue;
+      }
+
+      const presence = callPresenceByKey[conversation.roomId];
+      const others = presence?.users.filter((presenceUser) => presenceUser.id !== user.id) ?? [];
+
+      if (presence && others.length) {
+        return { conversation, kind: presence.kind, from: others[0], others };
+      }
+    }
+
+    return null;
+  })();
+  const incomingCallKey = incomingCall?.conversation.roomId ?? null;
   // Recomputed on every callTick (1s interval) while connected; "" otherwise.
   const callElapsedLabel =
     activeCall?.status === "connected" ? formatCallDuration(activeCall.startedAt) : "";
@@ -417,16 +453,6 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     postMessage(message);
   }, [postMessage, user]);
 
-  const postMissedCall = useCallback((roomId: string) => {
-    const message = createChatMessage({
-      body: "Chamada perdida",
-      roomId,
-      user,
-    });
-
-    postMessage(message);
-  }, [postMessage, user]);
-
   const sendCallMessage = useCallback((body: string) => {
     const currentCall = activeCallRef.current;
 
@@ -442,36 +468,6 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
 
     postMessage(message);
   }, [postMessage, user]);
-
-  const stopIncomingRing = useCallback(() => {
-    incomingRingRef.current?.stop();
-    incomingRingRef.current = null;
-  }, []);
-
-  const stopOutgoingRing = useCallback(() => {
-    outgoingRingRef.current?.stop();
-    outgoingRingRef.current = null;
-  }, []);
-
-  const clearCallRingTimeout = useCallback(() => {
-    if (!callRingTimeoutRef.current) {
-      return;
-    }
-
-    clearTimeout(callRingTimeoutRef.current);
-    callRingTimeoutRef.current = null;
-  }, []);
-
-  const clearIncomingCallTimeout = useCallback((callId: string) => {
-    const timeout = incomingCallTimeoutsRef.current[callId];
-
-    if (!timeout) {
-      return;
-    }
-
-    clearTimeout(timeout);
-    delete incomingCallTimeoutsRef.current[callId];
-  }, []);
 
   const removeGroupLocally = useCallback((groupId: string) => {
     setGroups((currentGroups) =>
@@ -494,10 +490,6 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     return `${callId}:${memberId}`;
   }
 
-  const getCallParticipantIds = useCallback((signal: Extract<ChatCallSignal, { type: "call:offer" }>) => {
-    return Array.from(new Set([...(signal.participantIds ?? []), signal.fromUserId, user.id]));
-  }, [user.id]);
-
   const createSignalBase = useCallback(
     (signal: OutgoingCallSignal): ChatCallSignal =>
       ({
@@ -512,6 +504,46 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   const sendCallSignal = useCallback((signal: ChatCallSignal) => {
     callConnectionRef.current?.sendSignal(signal);
   }, []);
+
+  const sendCallPresence = useCallback(
+    (conversationKey: string, kind: ChatCallKind, present: boolean) => {
+      callPresenceConnectionRef.current?.sendCallPresence({
+        type: "chat:call-presence",
+        roomScope,
+        conversationKey,
+        user: { id: user.id, name: user.name, email: user.email },
+        present,
+        kind,
+      });
+    },
+    [roomScope, user.email, user.id, user.name]
+  );
+
+  const declineIncomingCall = useCallback(
+    (call: { conversation: ChatConversation; others: ChatSocketUser[] }) => {
+      setDeclinedCallKeys((current) =>
+        current.includes(call.conversation.roomId)
+          ? current
+          : [...current, call.conversation.roomId]
+      );
+
+      // Tell whoever is in the room; if it leaves them alone, their call ends.
+      for (const other of call.others) {
+        sendCallSignal(
+          createSignalBase({
+            type: "call:end",
+            callId: call.conversation.roomId,
+            conversationRoomId: call.conversation.roomId,
+            conversationTitle: call.conversation.title,
+            fromUserId: user.id,
+            reason: "declined",
+            toUserId: other.id,
+          })
+        );
+      }
+    },
+    [createSignalBase, sendCallSignal, user.id]
+  );
 
   const flushIceCandidates = useCallback(async (callId: string) => {
     const peerEntries = Object.entries(callRefsRef.current);
@@ -561,10 +593,6 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   }, []);
 
   const clearActiveCall = useCallback(() => {
-    clearCallRingTimeout();
-    stopOutgoingRing();
-    stopIncomingRing();
-
     for (const peerCall of Object.values(callRefsRef.current)) {
       peerCall.close();
     }
@@ -574,7 +602,6 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     }
 
     callRefsRef.current = {};
-    pendingIncomingOffersRef.current = {};
     activeCallRef.current = null;
     localStreamRef.current = null;
     setActiveCall(null);
@@ -587,7 +614,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     if (typeof window !== "undefined" && window.location.pathname.endsWith("/call")) {
       router.replace(window.location.pathname.slice(0, -"/call".length));
     }
-  }, [clearCallRingTimeout, router, stopIncomingRing, stopOutgoingRing]);
+  }, [router]);
 
   const removePeer = useCallback((memberId: number) => {
     const peerCall = callRefsRef.current[memberId];
@@ -616,62 +643,47 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
       return nextStreams;
     });
 
+    delete remoteAudioRefs.current[memberId];
+
     if (!currentCall) {
       return;
     }
 
     const nextMemberIds = currentCall.memberIds.filter((id) => id !== memberId);
 
-    if (nextMemberIds.length === 0) {
-      if (currentCall.status === "connected") {
-        postCallSummary(currentCall);
-      }
-
-      playCallEndSound();
-      clearActiveCall();
+    // Once we'd be the only one left, the call is over — leave it too.
+    if (nextMemberIds.length === 0 && currentCall.status === "connected") {
+      endActiveCallRef.current();
       return;
     }
 
     activeCallRef.current = { ...currentCall, memberIds: nextMemberIds };
     setActiveCall(activeCallRef.current);
-  }, [clearActiveCall, postCallSummary]);
+  }, []);
 
   useEffect(() => {
     removePeerRef.current = removePeer;
   }, [removePeer]);
 
-  const endActiveCall = useCallback((notify = true) => {
+  const endActiveCall = useCallback(() => {
     const currentCall = activeCallRef.current;
 
-    if (notify && currentCall) {
-      playCallEndSound();
-      const participantIds = Array.from(new Set([user.id, ...currentCall.memberIds]));
-
-      for (const memberId of currentCall.memberIds) {
-        sendCallSignal(
-          createSignalBase({
-            type: "call:end",
-            callId: currentCall.callId,
-            conversationRoomId: currentCall.conversationRoomId,
-            conversationTitle: currentCall.conversationTitle,
-            fromUserId: user.id,
-            participantIds,
-            reason: "ended",
-            toUserId: memberId,
-          })
-        );
-      }
+    if (currentCall) {
+      // Announce we left the call room; the call lives on for anyone still in it.
+      sendCallPresence(currentCall.conversationRoomId, currentCall.kind, false);
 
       if (currentCall.status === "connected") {
         postCallSummary(currentCall);
       }
+
+      playCallEndSound();
     }
 
     clearActiveCall();
-  }, [clearActiveCall, createSignalBase, postCallSummary, sendCallSignal, user.id]);
+  }, [clearActiveCall, postCallSummary, sendCallPresence]);
 
   useEffect(() => {
-    endActiveCallRef.current = () => endActiveCall();
+    endActiveCallRef.current = endActiveCall;
   }, [endActiveCall]);
 
   useEffect(() => {
@@ -685,20 +697,6 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
 
     return () => window.removeEventListener("pagehide", handlePageHide);
   }, []);
-
-  useEffect(() => {
-    return () => {
-      clearCallRingTimeout();
-      stopIncomingRing();
-      stopOutgoingRing();
-
-      for (const timeout of Object.values(incomingCallTimeoutsRef.current)) {
-        clearTimeout(timeout);
-      }
-
-      incomingCallTimeoutsRef.current = {};
-    };
-  }, [clearCallRingTimeout, stopIncomingRing, stopOutgoingRing]);
 
   const answerPeerOffer = useCallback(async (
     signal: Extract<ChatCallSignal, { type: "call:offer" }>,
@@ -821,354 +819,114 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     }
   }, [createSignalBase, sendCallSignal, user.id, user.name]);
 
-  async function startCall(kind: ChatCallKind) {
-    if (!selectedConversation || !selectedConversation.memberIds.length) {
+  const connectCallMember = useCallback(async (memberId: number) => {
+    const currentCall = activeCallRef.current;
+
+    if (!currentCall || memberId === user.id) {
       return;
     }
 
-    endActiveCall(false);
+    if (!currentCall.memberIds.includes(memberId)) {
+      activeCallRef.current = {
+        ...currentCall,
+        memberIds: [...currentCall.memberIds, memberId],
+        status: "connected",
+      };
+      setActiveCall(activeCallRef.current);
+    }
 
-    const callId = createCallId();
-    const memberIds = selectedConversation.memberIds;
-    const participantIds = [user.id, ...memberIds];
-    const nextCall: ActiveCall = {
-      callId,
-      conversationRoomId: selectedConversation.roomId,
-      conversationTitle: selectedConversation.title,
-      kind,
-      memberIds,
-      startedAt: Date.now(),
-      status: "calling",
+    // createMeshOffers only offers higher-id peers; a lower-id peer offers us.
+    await createMeshOffers({
+      callId: currentCall.callId,
+      conversationRoomId: currentCall.conversationRoomId,
+      conversationTitle: currentCall.conversationTitle,
+      kind: currentCall.kind,
+      localMedia: { error: null, stream: localStreamRef.current },
+      participantIds: [memberId],
+    });
+  }, [createMeshOffers, user.id]);
+
+  useEffect(() => {
+    connectCallMemberRef.current = (memberId) => {
+      void connectCallMember(memberId);
     };
+  }, [connectCallMember]);
 
-    activeCallRef.current = nextCall;
-    setActiveCall(nextCall);
-    router.push(`/chat/${conversationIdToChatSlug(selectedConversation.id)}/call`);
-    stopOutgoingRing();
-    outgoingRingRef.current = playIncomingCallLoop();
-    clearCallRingTimeout();
-    callRingTimeoutRef.current = setTimeout(() => {
-      const currentCall = activeCallRef.current;
+  const joinCall = useCallback(
+    async (conversation: ChatConversation, requestedKind?: ChatCallKind) => {
+      const conversationKey = conversation.roomId;
 
-      if (!currentCall || currentCall.callId !== callId || currentCall.status !== "calling") {
+      if (
+        activeCallRef.current?.conversationRoomId === conversationKey ||
+        joiningRoomRef.current === conversationKey
+      ) {
         return;
       }
 
-      playCallEndSound();
-      postMissedCall(currentCall.conversationRoomId);
-      const participantIds = Array.from(new Set([user.id, ...currentCall.memberIds]));
-
-      for (const memberId of currentCall.memberIds) {
-        sendCallSignal(
-          createSignalBase({
-            type: "call:end",
-            callId,
-            conversationRoomId: currentCall.conversationRoomId,
-            conversationTitle: currentCall.conversationTitle,
-            fromUserId: user.id,
-            participantIds,
-            reason: "missed",
-            toUserId: memberId,
-          })
-        );
+      // Leave any other call before joining this one.
+      if (activeCallRef.current) {
+        endActiveCall();
       }
 
-      clearActiveCall();
-    }, callRingTimeoutMs);
+      joiningRoomRef.current = conversationKey;
 
-    try {
-      const localMedia = await createChatLocalStream(kind);
+      const existing = callPresenceByKeyRef.current[conversationKey];
+      const presentOthers = (existing?.users ?? []).filter(
+        (presenceUser) => presenceUser.id !== user.id
+      );
+      const kind = existing?.users.length
+        ? existing.kind
+        : requestedKind ?? pendingCallKindRef.current;
 
-      localStreamRef.current = localMedia.stream;
-      setLocalStream(localMedia.stream);
-      if (localMedia.error) {
-        showPanelError("Erro na chamada", getCallErrorMessage(localMedia.error));
-      }
-
-      for (const memberId of memberIds) {
-        const peerCall = await createChatPeerCall({
-          kind,
-          localMediaError: localMedia.error,
-          localStream: localMedia.stream,
-          onConnectionLost: () => removePeerRef.current(memberId),
-          onIceCandidate: (candidate) => {
-            sendCallSignal(
-              createSignalBase({
-                type: "call:candidate",
-                callId,
-                fromUserId: user.id,
-                toUserId: memberId,
-                candidate: candidate.toJSON(),
-              })
-            );
-          },
-          onRemoteStream: (stream) => {
-            setRemoteStreamsByUserId((currentStreams) => ({
-              ...currentStreams,
-              [memberId]: stream,
-            }));
-          },
-          stopLocalStreamOnClose: false,
-        });
-        const description = await peerCall.createOffer();
-
-        callRefsRef.current[memberId] = peerCall;
-        sendCallSignal(
-          createSignalBase({
-            type: "call:offer",
-            callId,
-            conversationRoomId: selectedConversation.roomId,
-            conversationTitle: selectedConversation.title,
-            fromUserId: user.id,
-            toUserId: memberId,
-            fromName: user.name,
-            participantIds,
-            description,
-            kind,
-          })
-        );
-      }
-    } catch (error) {
-      clearActiveCall();
-      showPanelError("Erro na chamada", getCallErrorMessage(error));
-    }
-  }
-
-  const answerIncomingCall = useCallback(
-    async (signal: Extract<ChatCallSignal, { type: "call:offer" }>) => {
-      clearIncomingCallTimeout(signal.callId);
-      delete pendingIncomingOffersRef.current[signal.callId];
-      stopIncomingRing();
-      endActiveCall(false);
-      const incomingConversation =
-        conversations.find((conversation) => conversation.roomId === signal.conversationRoomId) ??
-        conversations.find((conversation) => conversation.id === getPrivateConversationId(signal.fromUserId));
-
-      if (incomingConversation) {
-        router.push(`/chat/${conversationIdToChatSlug(incomingConversation.id)}/call`);
-      }
-
-      const participantIds = getCallParticipantIds(signal);
       const nextCall: ActiveCall = {
-        callId: signal.callId,
-        conversationRoomId:
-          signal.conversationRoomId ?? getPrivateRoomId(roomScope, user.id, signal.fromUserId),
-        conversationTitle: signal.conversationTitle ?? signal.fromName,
-        kind: signal.kind,
-        memberIds: participantIds.filter((participantId) => participantId !== user.id),
+        callId: conversationKey,
+        conversationRoomId: conversationKey,
+        conversationTitle: conversation.title,
+        kind,
+        memberIds: presentOthers.map((presenceUser) => presenceUser.id),
         startedAt: Date.now(),
-        status: "ringing",
+        status: presentOthers.length ? "connected" : "calling",
       };
 
       activeCallRef.current = nextCall;
       setActiveCall(nextCall);
 
       try {
-        const localMedia = await createChatLocalStream(signal.kind);
+        const localMedia = await createChatLocalStream(kind);
 
         localStreamRef.current = localMedia.stream;
         setLocalStream(localMedia.stream);
+
         if (localMedia.error) {
           showPanelError("Erro na chamada", getCallErrorMessage(localMedia.error));
         }
 
-        const pendingOffers = pendingIncomingOffersRef.current[signal.callId] ?? [signal];
-
-        delete pendingIncomingOffersRef.current[signal.callId];
-
-        for (const pendingOffer of pendingOffers) {
-          await answerPeerOffer(pendingOffer, localMedia);
-        }
+        // Announce we're in the room; members already present will also offer us.
+        sendCallPresence(conversationKey, kind, true);
 
         await createMeshOffers({
-          callId: signal.callId,
-          conversationRoomId:
-            signal.conversationRoomId ?? getPrivateRoomId(roomScope, user.id, signal.fromUserId),
-          conversationTitle: signal.conversationTitle ?? signal.fromName,
-          kind: signal.kind,
+          callId: conversationKey,
+          conversationRoomId: conversationKey,
+          conversationTitle: conversation.title,
+          kind,
           localMedia,
-          participantIds,
+          participantIds: presentOthers.map((presenceUser) => presenceUser.id),
         });
-        activeCallRef.current = {
-          ...nextCall,
-          status: "connected",
-        };
-        setActiveCall(activeCallRef.current);
       } catch (error) {
         clearActiveCall();
         showPanelError("Erro na chamada", getCallErrorMessage(error));
+      } finally {
+        joiningRoomRef.current = null;
       }
     },
-    [
-      clearActiveCall,
-      clearIncomingCallTimeout,
-      answerPeerOffer,
-      conversations,
-      createMeshOffers,
-      endActiveCall,
-      getCallParticipantIds,
-      roomScope,
-      router,
-      showPanelError,
-      stopIncomingRing,
-      user.id,
-    ]
+    [clearActiveCall, createMeshOffers, endActiveCall, sendCallPresence, showPanelError, user.id]
   );
 
-  const declineIncomingCall = useCallback(
-    (signal: Extract<ChatCallSignal, { type: "call:offer" }>) => {
-      const conversationRoomId =
-        signal.conversationRoomId ?? getPrivateRoomId(roomScope, user.id, signal.fromUserId);
-      const pendingOffers = pendingIncomingOffersRef.current[signal.callId] ?? [];
-      const peerIds = Array.from(new Set([
-        signal.fromUserId,
-        ...pendingOffers.map((pendingOffer) => pendingOffer.fromUserId),
-      ]));
-      const participantIds = Array.from(new Set([...(signal.participantIds ?? []), user.id, ...peerIds]));
-
-      clearIncomingCallTimeout(signal.callId);
-      delete pendingIncomingOffersRef.current[signal.callId];
-      stopIncomingRing();
-      playCallEndSound();
-      postMissedCall(conversationRoomId);
-      for (const peerId of peerIds) {
-        sendCallSignal(
-          createSignalBase({
-            type: "call:end",
-            callId: signal.callId,
-            conversationRoomId,
-            conversationTitle: signal.conversationTitle ?? signal.fromName,
-            fromUserId: user.id,
-            participantIds,
-            reason: "declined",
-            toUserId: peerId,
-          })
-        );
-      }
-    },
-    [
-      clearIncomingCallTimeout,
-      createSignalBase,
-      postMissedCall,
-      roomScope,
-      sendCallSignal,
-      stopIncomingRing,
-      user.id,
-    ]
-  );
-
-  const showIncomingCall = useCallback(
-    (signal: Extract<ChatCallSignal, { type: "call:offer" }>) => {
-      const conversationRoomId =
-        signal.conversationRoomId ?? getPrivateRoomId(roomScope, user.id, signal.fromUserId);
-      const pendingOffers = pendingIncomingOffersRef.current[signal.callId] ?? [];
-
-      if (!pendingOffers.some((pendingOffer) => pendingOffer.fromUserId === signal.fromUserId)) {
-        pendingIncomingOffersRef.current[signal.callId] = [...pendingOffers, signal];
-      }
-
-      if (pendingOffers.length) {
-        return;
-      }
-
-      clearIncomingCallTimeout(signal.callId);
-      if (!incomingRingRef.current) {
-        incomingRingRef.current = playIncomingCallLoop();
-      }
-      incomingCallTimeoutsRef.current[signal.callId] = setTimeout(() => {
-        const timeoutPendingOffers = pendingIncomingOffersRef.current[signal.callId] ?? [];
-        const peerIds = Array.from(new Set([
-          signal.fromUserId,
-          ...timeoutPendingOffers.map((pendingOffer) => pendingOffer.fromUserId),
-        ]));
-        const participantIds = Array.from(new Set([...(signal.participantIds ?? []), user.id, ...peerIds]));
-
-        screenPopup.hide(incomingCallPopupPosition);
-        stopIncomingRing();
-        playCallEndSound();
-        postMissedCall(conversationRoomId);
-        for (const peerId of peerIds) {
-          sendCallSignal(
-            createSignalBase({
-              type: "call:end",
-              callId: signal.callId,
-              conversationRoomId,
-              conversationTitle: signal.conversationTitle ?? signal.fromName,
-              fromUserId: user.id,
-              participantIds,
-              reason: "missed",
-              toUserId: peerId,
-            })
-          );
-        }
-        delete pendingIncomingOffersRef.current[signal.callId];
-        clearIncomingCallTimeout(signal.callId);
-      }, callRingTimeoutMs);
-
-      screenPopup.show(
-        incomingCallPopupPosition,
-        <div className="flex w-80 flex-col gap-3 border border-border bg-popover p-4 text-popover-foreground shadow-md">
-          <div className="flex items-start gap-3">
-            <span className="grid size-9 shrink-0 place-items-center bg-primary text-primary-foreground">
-              {signal.kind === "video" ? (
-                <Video className="size-4" />
-              ) : (
-                <Phone className="size-4" />
-              )}
-            </span>
-            <div className="min-w-0">
-              <p className="text-sm font-medium">
-                {signal.kind === "video" ? "Videochamada" : "Chamada"}
-              </p>
-              <p className="truncate text-sm text-muted-foreground">
-                {signal.fromName}
-              </p>
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                screenPopup.hide(incomingCallPopupPosition);
-                declineIncomingCall(signal);
-              }}
-            >
-              <PhoneOff />
-              Recusar
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => {
-                screenPopup.hide(incomingCallPopupPosition);
-                void answerIncomingCall(signal);
-              }}
-            >
-              <Phone />
-              Atender
-            </Button>
-          </div>
-        </div>,
-        {
-          className: "w-80",
-        }
-      );
-    },
-    [
-      answerIncomingCall,
-      clearIncomingCallTimeout,
-      createSignalBase,
-      declineIncomingCall,
-      postMissedCall,
-      roomScope,
-      screenPopup,
-      sendCallSignal,
-      stopIncomingRing,
-      user.id,
-    ]
-  );
+  useEffect(() => {
+    joinCallRef.current = (conversation) => {
+      void joinCall(conversation);
+    };
+  }, [joinCall]);
 
   const handleCallSignal = useCallback(
     (signal: ChatCallSignal) => {
@@ -1176,52 +934,56 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
         return;
       }
 
+      const currentCall = activeCallRef.current;
+
+      // Signals only matter for the call we're currently in — there is no
+      // ringing/incoming model anymore; you join a room and mesh with whoever
+      // is present.
       if (signal.type === "call:offer") {
-        if (activeCallRef.current?.callId === signal.callId) {
-          void (async () => {
-            const localMedia =
-              localStreamRef.current
-                ? { error: null, stream: localStreamRef.current }
-                : await createChatLocalStream(signal.kind);
-
-            if (!localStreamRef.current) {
-              localStreamRef.current = localMedia.stream;
-              setLocalStream(localMedia.stream);
-            }
-
-            await answerPeerOffer(signal, localMedia);
-            activeCallRef.current = {
-              ...activeCallRef.current!,
-              memberIds: Array.from(new Set([
-                ...activeCallRef.current!.memberIds,
-                signal.fromUserId,
-              ])),
-            };
-            setActiveCall(activeCallRef.current);
-          })();
+        if (currentCall?.callId !== signal.callId) {
           return;
         }
 
-        showIncomingCall(signal);
+        void (async () => {
+          const localMedia = localStreamRef.current
+            ? { error: null, stream: localStreamRef.current }
+            : await createChatLocalStream(signal.kind);
+
+          if (!localStreamRef.current) {
+            localStreamRef.current = localMedia.stream;
+            setLocalStream(localMedia.stream);
+          }
+
+          await answerPeerOffer(signal, localMedia);
+
+          if (activeCallRef.current) {
+            activeCallRef.current = {
+              ...activeCallRef.current,
+              memberIds: Array.from(
+                new Set([...activeCallRef.current.memberIds, signal.fromUserId])
+              ),
+              status: "connected",
+            };
+            setActiveCall(activeCallRef.current);
+          }
+        })();
         return;
       }
 
       if (signal.type === "call:answer") {
         const peerCall = callRefsRef.current[signal.fromUserId];
 
-        if (activeCallRef.current?.callId !== signal.callId || !peerCall) {
+        if (currentCall?.callId !== signal.callId || !peerCall) {
           return;
         }
 
         void peerCall.setRemoteAnswer(signal.description).then(async () => {
           await flushIceCandidates(signal.callId);
-          clearCallRingTimeout();
-          stopOutgoingRing();
-          activeCallRef.current = {
-            ...activeCallRef.current!,
-            status: "connected",
-          };
-          setActiveCall(activeCallRef.current);
+
+          if (activeCallRef.current) {
+            activeCallRef.current = { ...activeCallRef.current, status: "connected" };
+            setActiveCall(activeCallRef.current);
+          }
         });
         return;
       }
@@ -1231,38 +993,17 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
         return;
       }
 
-      if (signal.type === "call:end") {
-        const currentCall = activeCallRef.current;
-
-        if (currentCall?.callId === signal.callId) {
-          // A participant left an active call we're in — drop just their tile.
-          // removePeer ends the whole call for us only once no one else remains.
+      if (signal.type === "call:end" && currentCall?.callId === signal.callId) {
+        if (currentCall.memberIds.includes(signal.fromUserId)) {
+          // A connected peer left.
           removePeerRef.current(signal.fromUserId);
-          return;
+        } else if (currentCall.memberIds.length === 0) {
+          // Our invite was declined and we're the only one here — end the call.
+          endActiveCallRef.current();
         }
-
-        // Otherwise this is a call we're only ringing on (caller cancelled /
-        // declined elsewhere) — dismiss the incoming prompt.
-        screenPopup.hide(incomingCallPopupPosition);
-        clearIncomingCallTimeout(signal.callId);
-        delete pendingIncomingOffersRef.current[signal.callId];
-        clearCallRingTimeout();
-        stopIncomingRing();
-        stopOutgoingRing();
       }
     },
-    [
-      addIceCandidate,
-      answerPeerOffer,
-      clearCallRingTimeout,
-      clearIncomingCallTimeout,
-      flushIceCandidates,
-      showIncomingCall,
-      screenPopup,
-      stopIncomingRing,
-      stopOutgoingRing,
-      user.id,
-    ]
+    [addIceCandidate, answerPeerOffer, flushIceCandidates, user.id]
   );
 
   useEffect(() => {
@@ -1301,6 +1042,77 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
       callConnectionRef.current = null;
     };
   }, [handleCallSignal, roomScope, socketUrl, user]);
+
+  useEffect(() => {
+    const connection = connectChatSocket({
+      roomId: getCallsPresenceRoomId(roomScope),
+      url: socketUrl,
+      user,
+      onMessage: () => {},
+      onCallPresence: (presence: ChatCallPresence) => {
+        // Drive the mesh for the call we're currently in: connect to anyone who
+        // joins our room, drop anyone who leaves.
+        if (presence.user.id !== user.id) {
+          const currentCall = activeCallRef.current;
+
+          if (currentCall?.conversationRoomId === presence.conversationKey) {
+            if (presence.present) {
+              connectCallMemberRef.current(presence.user.id);
+            } else {
+              removePeerRef.current(presence.user.id);
+            }
+          }
+        }
+
+        setCallPresenceByKey((current) => {
+          const entry = current[presence.conversationKey];
+          const baseUsers = entry?.users ?? [];
+          const users = presence.present
+            ? [...baseUsers.filter((u) => u.id !== presence.user.id), presence.user]
+            : baseUsers.filter((u) => u.id !== presence.user.id);
+          const next = { ...current };
+
+          if (users.length) {
+            next[presence.conversationKey] = {
+              kind: presence.present ? presence.kind : entry?.kind ?? presence.kind,
+              users,
+            };
+          } else {
+            delete next[presence.conversationKey];
+          }
+
+          return next;
+        });
+
+        // When a call empties, forget any decline so a future call rings again.
+        if (!presence.present) {
+          const entry = callPresenceByKeyRef.current[presence.conversationKey];
+          const remaining = (entry?.users ?? []).filter(
+            (presenceUser) => presenceUser.id !== presence.user.id
+          );
+
+          if (!remaining.length) {
+            setDeclinedCallKeys((current) =>
+              current.includes(presence.conversationKey)
+                ? current.filter((key) => key !== presence.conversationKey)
+                : current
+            );
+          }
+        }
+      },
+    });
+
+    callPresenceConnectionRef.current = connection;
+
+    return () => {
+      connection.close();
+      callPresenceConnectionRef.current = null;
+    };
+  }, [roomScope, socketUrl, user]);
+
+  useEffect(() => {
+    callPresenceByKeyRef.current = callPresenceByKey;
+  }, [callPresenceByKey]);
 
   useEffect(() => {
     const connection = connectChatSocket({
@@ -1362,11 +1174,29 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: "end" });
-  }, [messages]);
+  }, [messages.length, roomId]);
 
   useEffect(() => {
     activeCallRef.current = activeCall;
   }, [activeCall]);
+
+  // Ring while there's an incoming call to answer.
+  useEffect(() => {
+    if (!incomingCallKey) {
+      incomingRingRef.current?.stop();
+      incomingRingRef.current = null;
+      return;
+    }
+
+    if (!incomingRingRef.current) {
+      incomingRingRef.current = playIncomingCallLoop();
+    }
+
+    return () => {
+      incomingRingRef.current?.stop();
+      incomingRingRef.current = null;
+    };
+  }, [incomingCallKey]);
 
   useEffect(() => {
     localStreamRef.current = localStream;
@@ -1393,12 +1223,18 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   }, [remoteStreamsByUserId]);
 
   useEffect(() => {
-    // A /call URL opened with no active call (stale link, refresh) falls back to
-    // the conversation. Live calls keep the URL via clearActiveCall on hangup.
-    if (!activeCallRef.current && pathname?.endsWith("/call") && chatIdSlug) {
-      router.replace(`/chat/${chatIdSlug}`);
+    // The /call route IS the call: entering it joins (or rejoins) the room.
+    // joinCall is idempotent, so re-runs while already in the call are no-ops.
+    if (!pathname?.endsWith("/call") || !selectedConversation) {
+      return;
     }
-  }, [chatIdSlug, pathname, router]);
+
+    if (activeCallRef.current?.conversationRoomId === selectedConversation.roomId) {
+      return;
+    }
+
+    joinCallRef.current(selectedConversation);
+  }, [pathname, selectedConversation]);
 
   useEffect(() => {
     if (!activeCall || activeCall.status !== "connected") {
@@ -1409,6 +1245,15 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
 
     return () => clearInterval(interval);
   }, [activeCall]);
+
+  function startCallWithKind(kind: ChatCallKind) {
+    if (!selectedConversation) {
+      return;
+    }
+
+    pendingCallKindRef.current = kind;
+    router.push(`/chat/${conversationIdToChatSlug(selectedConversation.id)}/call`);
+  }
 
   function sendMessage() {
     const body = draft.trim();
@@ -1553,28 +1398,21 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
                 type="button"
                 variant="ghost"
                 size="icon-sm"
-                aria-label={activeCall ? "Terminar chamada" : "Iniciar chamada"}
-                disabled={!selectedConversation && !activeCall}
-                onClick={() => {
-                  if (activeCall) {
-                    endActiveCall();
-                    return;
-                  }
-
-                  void startCall("audio");
-                }}
+                aria-label={selectedConversationHasCall ? "Entrar na chamada" : "Iniciar chamada"}
+                disabled={!selectedConversation}
+                className={cn(selectedConversationHasCall && "text-yellow-500 hover:text-yellow-500")}
+                onClick={() => startCallWithKind("audio")}
               >
-                {activeCall ? <PhoneOff /> : <Phone />}
+                <Phone />
               </Button>
               <Button
                 type="button"
                 variant="ghost"
                 size="icon-sm"
-                aria-label="Iniciar videochamada"
-                disabled={!selectedConversation || Boolean(activeCall)}
-                onClick={() => {
-                  void startCall("video");
-                }}
+                aria-label={selectedConversationHasCall ? "Entrar na videochamada" : "Iniciar videochamada"}
+                disabled={!selectedConversation}
+                className={cn(selectedConversationHasCall && "text-yellow-500 hover:text-yellow-500")}
+                onClick={() => startCallWithKind("video")}
               >
                 <Video />
               </Button>
@@ -1842,6 +1680,43 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
         </div>
       </aside>
       </section>
+
+      {incomingCall ? (
+        <div className="fixed bottom-4 right-4 z-50 flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-3 border border-border bg-popover p-4 text-popover-foreground shadow-lg">
+          <div className="flex items-center gap-3">
+            <Avatar size="default">
+              <AvatarFallback>{getInitials(incomingCall.from.name)}</AvatarFallback>
+            </Avatar>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">{incomingCall.conversation.title}</p>
+              <p className="truncate text-xs text-muted-foreground">
+                {incomingCall.kind === "video" ? "Videochamada" : "Chamada"} · {incomingCall.from.name}
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => declineIncomingCall(incomingCall)}
+            >
+              <PhoneOff />
+              Recusar
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              onClick={() =>
+                router.push(`/chat/${conversationIdToChatSlug(incomingCall.conversation.id)}/call`)
+              }
+            >
+              <Phone />
+              Atender
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       {activeCall ? (
         <CallScreen
