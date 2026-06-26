@@ -20,7 +20,6 @@ import {
 import {
   deleteTaskAction,
   deleteTaskAttachmentAction,
-  downloadTaskAttachmentAction,
   uploadTaskAttachmentAction,
   updateTaskAction,
 } from "@/app/(root)/boards/actions"
@@ -269,7 +268,6 @@ export function TaskDialog({
         <form
           id={`upload-task-attachment-${task.id}`}
           action={uploadTaskAttachmentAction}
-          encType="multipart/form-data"
         >
           <input type="hidden" name="boardId" value={boardId} />
           <input type="hidden" name="taskId" value={task.id} />
@@ -277,18 +275,6 @@ export function TaskDialog({
         </form>
         {task.attachments.map((attachment) => (
           <span key={attachment.id} className="contents">
-            <form
-              id={`download-task-attachment-${attachment.id}`}
-              action={downloadTaskAttachmentAction}
-            >
-              <input type="hidden" name="boardId" value={boardId} />
-              <input type="hidden" name="taskId" value={task.id} />
-              <input
-                type="hidden"
-                name="attachmentId"
-                value={attachment.id}
-              />
-            </form>
             <form
               id={`delete-task-attachment-${attachment.id}`}
               action={deleteTaskAttachmentAction}
@@ -666,8 +652,11 @@ export function TaskDialog({
                                   </p>
                                 </div>
                                 <Button
-                                  type="submit"
-                                  form={`download-task-attachment-${attachment.id}`}
+                                  render={
+                                    <a
+                                      href={`/api/boards/${boardId}/tasks/${task.id}/attachments/${attachment.id}/download`}
+                                    />
+                                  }
                                   variant="ghost"
                                   size="icon-sm"
                                   aria-label={`Descarregar ${attachment.fileName}`}

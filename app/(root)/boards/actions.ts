@@ -6,7 +6,6 @@ import { verifySession } from "@/lib/auth/session";
 import { db } from "@/lib/db";
 import {
   deleteTaskAttachmentObject,
-  getTaskAttachmentDownloadUrl,
   getTaskAttachmentObjectKey,
   taskAttachmentBucket,
   uploadTaskAttachmentObject,
@@ -1885,75 +1884,6 @@ export async function deleteTaskAttachmentAction(formData: FormData) {
       message: "Anexo eliminado.",
     })
   );
-}
-
-export async function downloadTaskAttachmentAction(formData: FormData) {
-  const session = await verifySession();
-  const boardId = Number(formData.get("boardId"));
-  const taskId = Number(formData.get("taskId"));
-  const attachmentId = Number(formData.get("attachmentId"));
-
-  if (
-    !session.activeTenantId ||
-    !Number.isInteger(boardId) ||
-    !Number.isInteger(taskId) ||
-    !Number.isInteger(attachmentId)
-  ) {
-    boardsRedirect("Não foi possível descarregar o anexo.", "error");
-  }
-
-  const membership = await db.tenantUser.findUnique({
-    where: {
-      userId_tenantId: {
-        userId: session.userId,
-        tenantId: session.activeTenantId,
-      },
-    },
-    select: {
-      tenantId: true,
-      tenant: {
-        select: {
-          deletedAt: true,
-        },
-      },
-    },
-  });
-
-  if (!membership || membership.tenant.deletedAt) {
-    boardsRedirect("Não tem acesso a esta organização.", "error");
-  }
-
-  const task = await findAccessibleTask({
-    boardId,
-    taskId,
-    tenantId: membership.tenantId,
-    userId: session.userId,
-    role: session.role,
-  });
-
-  if (!task) {
-    boardsRedirect("A tarefa não foi encontrada.", "error");
-  }
-
-  const attachment = await db.taskAttachment.findFirst({
-    where: {
-      id: attachmentId,
-      taskId: task.id,
-    },
-    select: {
-      contentType: true,
-      fileName: true,
-      objectKey: true,
-    },
-  });
-
-  if (!attachment) {
-    boardsRedirect("O anexo não foi encontrado.", "error");
-  }
-
-  const url = await getTaskAttachmentDownloadUrl(attachment);
-
-  redirect(url);
 }
 
 export async function toggleTaskCompletedAction(formData: FormData) {
