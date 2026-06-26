@@ -23,6 +23,7 @@ import { Checklist } from "@/components/checklist"
 import { InlineEditableField } from "@/components/ui/inline-editable-field"
 import { MarkdownEditor } from "@/components/markdown-editor"
 import { Multiselect } from "@/components/multiselect"
+import { BoardRedirectInput } from "@/components/pages/boards/board-redirect-input"
 import TaskCard, { type TaskCardTask } from "@/components/pages/boards/task-card"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -226,6 +227,7 @@ export function TaskDialog({
         <form id={`delete-task-${task.id}`} action={deleteTaskAction}>
           <input type="hidden" name="boardId" value={boardId} />
           <input type="hidden" name="taskId" value={task.id} />
+          <BoardRedirectInput />
           <button
             id={`delete-task-submit-${task.id}`}
             type="submit"
@@ -236,6 +238,7 @@ export function TaskDialog({
         <form action={updateTaskAction}>
           <input type="hidden" name="boardId" value={boardId} />
           <input type="hidden" name="taskId" value={task.id} />
+          <BoardRedirectInput />
           {boardCustomFields.map((field) => {
             const value = customFieldValueById.get(field.id)
             const fieldValue =

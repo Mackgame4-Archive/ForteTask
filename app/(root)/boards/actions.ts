@@ -15,6 +15,7 @@ import {
   toggleTaskCompletedSchema,
   updateBoardSchema,
   updateColumnSchema,
+  updateTaskDatesSchema,
   updateTaskSchema,
 } from "@/schemas/boards";
 
@@ -23,8 +24,56 @@ function boardsRedirect(message: string, type: "error" | "saved" = "saved"): nev
   redirect(`/boards?${params.toString()}`);
 }
 
+function boardTaskRedirectUrl({
+  boardId,
+  formData,
+  message,
+  type = "saved",
+}: {
+  boardId: number;
+  formData: FormData;
+  message: string;
+  type?: "error" | "saved";
+}) {
+  const fallbackPath = `/boards/${boardId}`;
+  const redirectTo = formData.get("redirectTo")?.toString() || fallbackPath;
+  const url = new URL(redirectTo, "http://fortetask.local");
+  const allowedPath = `/boards/${boardId}`;
+  const isBoardPath =
+    url.origin === "http://fortetask.local" &&
+    (url.pathname === allowedPath || url.pathname.startsWith(`${allowedPath}/`));
+
+  if (!isBoardPath) {
+    const params = new URLSearchParams({ [type]: message });
+
+    return `${fallbackPath}?${params.toString()}`;
+  }
+
+  url.searchParams.delete("error");
+  url.searchParams.delete("saved");
+  url.searchParams.set(type, message);
+
+  return `${url.pathname}?${url.searchParams.toString()}`;
+}
+
 function canManageBoards(role?: string) {
   return role === "admin" || role === "manager" || role === "coordinator";
+}
+
+function startOfDateOnly(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function applyDatePart(currentDate: Date | null, targetDate: Date) {
+  return new Date(
+    targetDate.getFullYear(),
+    targetDate.getMonth(),
+    targetDate.getDate(),
+    currentDate?.getHours() ?? 0,
+    currentDate?.getMinutes() ?? 0,
+    currentDate?.getSeconds() ?? 0,
+    currentDate?.getMilliseconds() ?? 0
+  );
 }
 
 function parseSubTasks(formData: FormData) {
@@ -178,7 +227,9 @@ async function findAccessibleTask({
       columnId: true,
       completed: true,
       completedAt: true,
+      dueDate: true,
       position: true,
+      startDate: true,
       column: {
         select: {
           boardId: true,
@@ -924,8 +975,13 @@ export async function createTaskAction(formData: FormData) {
     },
   });
 
-  const params = new URLSearchParams({ saved: "Tarefa criada." });
-  redirect(`/boards/${column.boardId}?${params.toString()}`);
+  redirect(
+    boardTaskRedirectUrl({
+      boardId: column.boardId,
+      formData,
+      message: "Tarefa criada.",
+    })
+  );
 }
 
 export async function updateTaskAction(formData: FormData) {
@@ -1217,8 +1273,13 @@ export async function updateTaskAction(formData: FormData) {
     }
   });
 
-  const params = new URLSearchParams({ saved: "Tarefa atualizada." });
-  redirect(`/boards/${taskBoardId}?${params.toString()}`);
+  redirect(
+    boardTaskRedirectUrl({
+      boardId: taskBoardId,
+      formData,
+      message: "Tarefa atualizada.",
+    })
+  );
 }
 
 export async function moveTaskAction(formData: FormData) {
@@ -1385,6 +1446,102 @@ export async function moveTaskAction(formData: FormData) {
   return { saved: true };
 }
 
+export async function updateTaskDatesAction(formData: FormData) {
+  const session = await verifySession();
+
+  if (!session.activeTenantId) {
+    return { error: "Selecione uma organização antes de editar uma tarefa." };
+  }
+
+  const parsed = updateTaskDatesSchema.safeParse({
+    boardId: formData.get("boardId"),
+    taskId: formData.get("taskId"),
+    edge: formData.get("edge"),
+    targetDate: formData.get("targetDate"),
+  });
+
+  if (!parsed.success || !parsed.data.targetDate) {
+    return { error: "Não foi possível atualizar as datas da tarefa." };
+  }
+
+  const membership = await db.tenantUser.findUnique({
+    where: {
+      userId_tenantId: {
+        userId: session.userId,
+        tenantId: session.activeTenantId,
+      },
+    },
+    select: {
+      tenantId: true,
+      tenant: {
+        select: {
+          deletedAt: true,
+        },
+      },
+    },
+  });
+
+  if (!membership || membership.tenant.deletedAt) {
+    return { error: "Não tem acesso a esta organização." };
+  }
+
+  const task = await findAccessibleTask({
+    boardId: parsed.data.boardId,
+    taskId: parsed.data.taskId,
+    tenantId: membership.tenantId,
+    userId: session.userId,
+    role: session.role,
+  });
+
+  if (!task) {
+    return { error: "A tarefa não foi encontrada." };
+  }
+
+  const targetDate = parsed.data.targetDate;
+
+  if (parsed.data.edge === "start") {
+    const nextStartDate = applyDatePart(task.startDate, targetDate);
+
+    if (
+      task.dueDate &&
+      startOfDateOnly(nextStartDate) > startOfDateOnly(task.dueDate)
+    ) {
+      return { error: "A data de início não pode ficar depois da data limite." };
+    }
+
+    await db.task.update({
+      where: {
+        id: task.id,
+      },
+      data: {
+        startDate: nextStartDate,
+      },
+    });
+
+    return { saved: true };
+  }
+
+  const nextDueDate = applyDatePart(task.dueDate, targetDate);
+
+  if (
+    task.startDate &&
+    startOfDateOnly(nextDueDate) < startOfDateOnly(task.startDate)
+  ) {
+    return { error: "A data limite não pode ficar antes da data de início." };
+  }
+
+  await db.task.update({
+    where: {
+      id: task.id,
+    },
+    data: {
+      dueDate: nextDueDate,
+    },
+  });
+
+  return { saved: true };
+}
+
 export async function moveColumnAction(formData: FormData) {
   const session = await verifySession();
 
@@ -1532,8 +1689,13 @@ export async function deleteTaskAction(formData: FormData) {
     },
   });
 
-  const params = new URLSearchParams({ saved: "Tarefa eliminada." });
-  redirect(`/boards/${task.column?.boardId ?? parsed.data.boardId}?${params.toString()}`);
+  redirect(
+    boardTaskRedirectUrl({
+      boardId: task.column?.boardId ?? parsed.data.boardId,
+      formData,
+      message: "Tarefa eliminada.",
+    })
+  );
 }
 
 export async function toggleTaskCompletedAction(formData: FormData) {
