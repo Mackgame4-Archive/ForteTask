@@ -6,8 +6,10 @@ import { ListFilter } from "lucide-react";
 
 import {
   createTaskAction,
+  toggleTaskCompletedAction,
   updateTaskDatesAction,
 } from "@/app/(root)/boards/actions";
+import { CheckIconSwitch } from "@/components/checkicon-switch";
 import { DatePicker } from "@/components/date-picker";
 import { DraggableItem } from "@/components/draggable";
 import { Multiselect } from "@/components/multiselect";
@@ -32,6 +34,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Avatar,
+  AvatarFallback,
+  AvatarGroup,
+  AvatarGroupCount,
+} from "@/components/ui/avatar";
 import {
   Popover,
   PopoverContent,
@@ -149,6 +157,17 @@ function getTaskDragEdge(context: CalendarItemRenderContext) {
 
 function serializeCalendarDate(value: CalendarItem["startDate"]) {
   return value instanceof Date ? value.toISOString() : value;
+}
+
+function getInitials(name: string) {
+  return (
+    name
+      .split(" ")
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase())
+      .join("") || "U"
+  );
 }
 
 function BoardCalendar({
@@ -352,6 +371,8 @@ function BoardCalendarTask({
       userEmail={userEmail}
       trigger={
         <BoardCalendarTaskTrigger
+          key={`${boardTask.id}-${boardTask.completed}`}
+          boardId={boardId}
           task={boardTask}
           position={context.position}
         />
@@ -649,15 +670,48 @@ function AddCalendarTaskSheet({
 }
 
 function BoardCalendarTaskTrigger({
+  boardId,
   position,
   task,
 }: {
+  boardId: number;
   position: CalendarItemRenderContext["position"];
   task: BoardCalendarTask;
 }) {
+  const router = useRouter();
+  const [completed, setCompleted] = useState(task.completed ?? false);
+  const [, startTransition] = useTransition();
   const color = task.column?.color ?? "var(--primary)";
   const showStartBar = position === "start" || position === "single";
   const showEndBar = position === "end" || position === "single";
+  const showTaskControls = position === "start" || position === "single";
+  const visibleAssignees = task.dialogTask.assignees.slice(0, 2);
+  const remainingAssignees = Math.max(
+    task.dialogTask.assignees.length - visibleAssignees.length,
+    0
+  );
+
+  function toggleCompleted(nextCompleted: boolean) {
+    const previousCompleted = completed;
+
+    setCompleted(nextCompleted);
+    startTransition(async () => {
+      const formData = new FormData();
+      formData.set("boardId", String(boardId));
+      formData.set("taskId", String(task.id));
+      formData.set("completed", String(nextCompleted));
+
+      const result = await toggleTaskCompletedAction(formData);
+
+      if (result?.error) {
+        setCompleted(previousCompleted);
+        window.alert(result.error);
+        return;
+      }
+
+      router.refresh();
+    });
+  }
 
   return (
     <div
@@ -665,7 +719,7 @@ function BoardCalendarTaskTrigger({
         "min-w-0 cursor-pointer border-l-0 border-r-0 bg-muted px-2 py-1 text-xs text-foreground transition-colors hover:bg-muted/70",
         showStartBar && "border-l-2",
         showEndBar && "border-r-2",
-        task.completed && "text-muted-foreground line-through"
+        completed && "text-muted-foreground line-through"
       )}
       style={{
         borderLeftColor: showStartBar ? color : undefined,
@@ -675,9 +729,43 @@ function BoardCalendarTaskTrigger({
         .filter(Boolean)
         .join(" - ")}
     >
-      <p className="truncate font-medium">{task.title}</p>
+      <div className="flex min-w-0 items-center gap-1.5">
+        {showTaskControls ? (
+          <CheckIconSwitch
+            checked={completed}
+            className="size-4 [&_svg]:size-3.5"
+            label={
+              completed
+                ? "Marcar tarefa como por concluir"
+                : "Marcar tarefa como concluida"
+            }
+            onCheckedChange={toggleCompleted}
+          />
+        ) : null}
+        <p className="min-w-0 flex-1 truncate font-medium">{task.title}</p>
+        {showTaskControls && visibleAssignees.length ? (
+          <AvatarGroup
+            className="shrink-0 -space-x-1.5"
+            onClick={(event) => event.stopPropagation()}
+          >
+            {visibleAssignees.map(({ user }) => (
+              <Avatar key={user.id} size="sm" title={user.name}>
+                <AvatarFallback>{getInitials(user.name)}</AvatarFallback>
+              </Avatar>
+            ))}
+            {remainingAssignees ? (
+              <AvatarGroupCount>+{remainingAssignees}</AvatarGroupCount>
+            ) : null}
+          </AvatarGroup>
+        ) : null}
+      </div>
       {task.column ? (
-        <p className="truncate text-[11px] text-muted-foreground">
+        <p
+          className={cn(
+            "truncate text-[11px] text-muted-foreground",
+            showTaskControls && "pl-5"
+          )}
+        >
           {task.column.name}
         </p>
       ) : null}
