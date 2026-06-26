@@ -58,6 +58,13 @@ export default async function BoardPage({ params, searchParams }: BoardPageProps
         : pageParams.view === "table"
           ? "table"
           : "board";
+  const boardColumns = board.columns.map((column) => ({
+    ...column,
+    tasks: column.tasks.map((task) => ({
+      ...task,
+      columnId: task.columnId ?? column.id,
+    })),
+  }));
 
   return (
     <PageLayout
@@ -69,7 +76,7 @@ export default async function BoardPage({ params, searchParams }: BoardPageProps
       }
       footer={
         <>
-          <span>{board.columns.length} colunas</span>
+          <span>{boardColumns.length} colunas</span>
           <span>{totalTasks} tarefas</span>
           <span>{board.teams.length} equipas</span>
         </>
@@ -215,7 +222,7 @@ export default async function BoardPage({ params, searchParams }: BoardPageProps
         <BoardCalendar
           boardId={board.id}
           boardName={board.name}
-          columns={board.columns}
+          columns={boardColumns}
           boardLabels={board.labels}
           boardCustomFields={board.customFields}
           boardMembers={boardMembers}
@@ -226,7 +233,7 @@ export default async function BoardPage({ params, searchParams }: BoardPageProps
         <BoardTimeline
           boardId={board.id}
           boardName={board.name}
-          columns={board.columns}
+          columns={boardColumns}
           boardLabels={board.labels}
           boardCustomFields={board.customFields}
           boardMembers={boardMembers}
@@ -236,7 +243,7 @@ export default async function BoardPage({ params, searchParams }: BoardPageProps
       ) : view === "table" ? (
         <BoardTable
           boardId={board.id}
-          columns={board.columns}
+          columns={boardColumns}
           boardLabels={board.labels}
           boardCustomFields={board.customFields}
           boardMembers={boardMembers}
@@ -247,7 +254,7 @@ export default async function BoardPage({ params, searchParams }: BoardPageProps
         <BoardKanban
           boardId={board.id}
           canManage={canManage}
-          columns={board.columns}
+          columns={boardColumns}
           boardLabels={board.labels}
           boardCustomFields={board.customFields}
           boardMembers={boardMembers}

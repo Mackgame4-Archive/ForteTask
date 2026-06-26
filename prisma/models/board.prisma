@@ -1,16 +1,16 @@
 model Board {
-  id          Int      @id @default(autoincrement())
-  tenantId    Int      @map("tenant_id")
-  name        String   @db.VarChar(120)
-  slug        String   @db.VarChar(80)
+  id Int @id @default(autoincrement())
+  tenantId Int @map("tenant_id")
+  name String @db.VarChar(120)
+  slug String @db.VarChar(80)
   description String?
-  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
-  tenant    Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  columns   BoardColumn[]
-  teams     BoardTeam[]
-  labels    BoardLabel[]
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  columns BoardColumn[]
+  teams BoardTeam[]
+  labels BoardLabel[]
   customFields BoardCustomField[]
 
   @@unique([tenantId, slug])
@@ -19,18 +19,18 @@ model Board {
 }
 
 model BoardCustomField {
-  id        Int                  @id @default(autoincrement())
-  boardId   Int                  @map("board_id")
-  name      String               @db.VarChar(80)
-  slug      String               @db.VarChar(80)
-  type      BoardCustomFieldType
-  minValue  Int?                 @map("min_value")
-  maxValue  Int?                 @map("max_value")
-  position  Int                  @default(0)
-  createdAt DateTime             @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt DateTime             @updatedAt @map("updated_at") @db.Timestamptz
+  id Int @id @default(autoincrement())
+  boardId Int @map("board_id")
+  name String @db.VarChar(80)
+  slug String @db.VarChar(80)
+  type BoardCustomFieldType
+  minValue Int? @map("min_value")
+  maxValue Int? @map("max_value")
+  position Int @default(0)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
-  board  Board                  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  board Board @relation(fields: [boardId], references: [id], onDelete: Cascade)
   values TaskCustomFieldValue[]
 
   @@unique([boardId, slug])
@@ -39,13 +39,13 @@ model BoardCustomField {
 }
 
 model BoardLabel {
-  id        Int      @id @default(autoincrement())
-  boardId   Int      @map("board_id")
-  name      String   @db.VarChar(80)
+  id Int @id @default(autoincrement())
+  boardId Int @map("board_id")
+  name String @db.VarChar(80)
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
-  board Board       @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  board Board @relation(fields: [boardId], references: [id], onDelete: Cascade)
   tasks TaskLabel[]
 
   @@unique([boardId, name])
@@ -54,12 +54,12 @@ model BoardLabel {
 }
 
 model BoardTeam {
-  boardId   Int      @map("board_id")
-  teamId    Int      @map("team_id")
+  boardId Int @map("board_id")
+  teamId Int @map("team_id")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
 
   board Board @relation(fields: [boardId], references: [id], onDelete: Cascade)
-  team  Team  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
 
   @@id([boardId, teamId])
   @@index([teamId])
@@ -67,16 +67,16 @@ model BoardTeam {
 }
 
 model BoardColumn {
-  id        Int      @id @default(autoincrement())
-  boardId   Int      @map("board_id")
-  name      String   @db.VarChar(120)
-  slug      String   @db.VarChar(80)
-  color     String   @default("#3b82f6") @db.VarChar(9)
-  position  Int      @default(0)
+  id Int @id @default(autoincrement())
+  boardId Int @map("board_id")
+  name String @db.VarChar(120)
+  slug String @db.VarChar(80)
+  color String @default("#3b82f6") @db.VarChar(9)
+  position Int @default(0)
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
-  board Board  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  board Board @relation(fields: [boardId], references: [id], onDelete: Cascade)
   tasks Task[]
 
   @@unique([boardId, slug])

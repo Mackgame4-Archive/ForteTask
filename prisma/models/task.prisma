@@ -1,25 +1,26 @@
 model Task {
-  id          Int       @id @default(autoincrement())
-  tenantId    Int?      @map("tenant_id")
-  columnId    Int?      @map("column_id")
-  createdById Int?      @map("created_by_id")
-  title       String    @db.VarChar(255)
+  id Int @id @default(autoincrement())
+  tenantId Int? @map("tenant_id")
+  columnId Int? @map("column_id")
+  createdById Int? @map("created_by_id")
+  title String @db.VarChar(255)
   description String?
-  completed   Boolean   @default(false)
-  position    Int       @default(0)
-  startDate   DateTime? @map("start_date") @db.Timestamptz
-  dueDate     DateTime? @map("due_date") @db.Timestamptz
+  completed Boolean @default(false)
+  position Int @default(0)
+  startDate DateTime? @map("start_date") @db.Timestamptz
+  dueDate DateTime? @map("due_date") @db.Timestamptz
   completedAt DateTime? @map("completed_at") @db.Timestamptz
-  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
-  tenant    Tenant?      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  column    BoardColumn? @relation(fields: [columnId], references: [id], onDelete: Cascade)
-  createdBy User?        @relation("TaskCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
-  labels    TaskLabel[]
-  subTasks  SubTask[]
+  tenant Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  column BoardColumn? @relation(fields: [columnId], references: [id], onDelete: Cascade)
+  createdBy User? @relation("TaskCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  labels TaskLabel[]
+  subTasks SubTask[]
   assignees TaskAssignee[]
   customFieldValues TaskCustomFieldValue[]
+  attachments TaskAttachment[]
 
   @@index([tenantId])
   @@index([columnId])
@@ -30,15 +31,34 @@ model Task {
   @@map("task")
 }
 
-model TaskCustomFieldValue {
-  taskId      Int     @map("task_id")
-  customFieldId Int   @map("custom_field_id")
-  stringValue String? @map("string_value") @db.VarChar(255)
-  integerValue Int?   @map("integer_value")
-  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz
+model TaskAttachment {
+  id Int @id @default(autoincrement())
+  taskId Int @map("task_id")
+  uploadedById Int? @map("uploaded_by_id")
+  bucket String @db.VarChar(120)
+  objectKey String @map("object_key") @db.VarChar(500)
+  fileName String @map("file_name") @db.VarChar(255)
+  contentType String @map("content_type") @db.VarChar(255)
+  size Int
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
 
-  task        Task             @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  uploadedBy User? @relation("TaskAttachmentUploadedBy", fields: [uploadedById], references: [id], onDelete: SetNull)
+
+  @@index([taskId])
+  @@index([uploadedById])
+  @@map("task_attachment")
+}
+
+model TaskCustomFieldValue {
+  taskId Int @map("task_id")
+  customFieldId Int @map("custom_field_id")
+  stringValue String? @map("string_value") @db.VarChar(255)
+  integerValue Int? @map("integer_value")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
   customField BoardCustomField @relation(fields: [customFieldId], references: [id], onDelete: Cascade)
 
   @@id([taskId, customFieldId])
@@ -47,8 +67,8 @@ model TaskCustomFieldValue {
 }
 
 model TaskAssignee {
-  taskId    Int      @map("task_id")
-  userId    Int      @map("user_id")
+  taskId Int @map("task_id")
+  userId Int @map("user_id")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
 
   task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
@@ -60,11 +80,11 @@ model TaskAssignee {
 }
 
 model TaskLabel {
-  taskId       Int      @map("task_id")
-  boardLabelId Int      @map("board_label_id")
+  taskId Int @map("task_id")
+  boardLabelId Int @map("board_label_id")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
 
-  task  Task       @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
   label BoardLabel @relation(fields: [boardLabelId], references: [id], onDelete: Cascade)
 
   @@id([taskId, boardLabelId])
@@ -73,9 +93,9 @@ model TaskLabel {
 }
 
 model SubTask {
-  id          Int       @id @default(autoincrement())
-  taskId      Int       @map("task_id")
-  title       String    @db.VarChar(255)
+  id Int @id @default(autoincrement())
+  taskId Int @map("task_id")
+  title String @db.VarChar(255)
   completedAt DateTime? @map("completed_at") @db.Timestamptz
 
   task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)

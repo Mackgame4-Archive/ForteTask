@@ -23,6 +23,7 @@
 /migrations
 /generated
 /prisma/migrations
+/certificates
 
 # misc
 .DS_Store
@@ -44,5 +45,3 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-
-certificates

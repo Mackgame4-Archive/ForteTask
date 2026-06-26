@@ -332,6 +332,24 @@ export async function getBoardPageData(boardId: string) {
                     integerValue: true,
                   },
                 },
+                attachments: {
+                  orderBy: {
+                    createdAt: "desc",
+                  },
+                  select: {
+                    id: true,
+                    fileName: true,
+                    contentType: true,
+                    size: true,
+                    createdAt: true,
+                    uploadedBy: {
+                      select: {
+                        id: true,
+                        name: true,
+                      },
+                    },
+                  },
+                },
               },
             },
           },

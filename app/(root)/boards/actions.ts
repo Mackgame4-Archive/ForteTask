@@ -5,6 +5,13 @@ import { redirect } from "next/navigation";
 import { verifySession } from "@/lib/auth/session";
 import { db } from "@/lib/db";
 import {
+  deleteTaskAttachmentObject,
+  getTaskAttachmentDownloadUrl,
+  getTaskAttachmentObjectKey,
+  taskAttachmentBucket,
+  uploadTaskAttachmentObject,
+} from "@/lib/storage/task-attachments";
+import {
   boardSchema,
   createColumnSchema,
   createTaskSchema,
@@ -23,6 +30,8 @@ function boardsRedirect(message: string, type: "error" | "saved" = "saved"): nev
   const params = new URLSearchParams({ [type]: message });
   redirect(`/boards?${params.toString()}`);
 }
+
+const maxTaskAttachmentSize = 25 * 1024 * 1024;
 
 function boardTaskRedirectUrl({
   boardId,
@@ -1696,6 +1705,255 @@ export async function deleteTaskAction(formData: FormData) {
       message: "Tarefa eliminada.",
     })
   );
+}
+
+export async function uploadTaskAttachmentAction(formData: FormData) {
+  const session = await verifySession();
+  const boardId = Number(formData.get("boardId"));
+  const taskId = Number(formData.get("taskId"));
+  const file = formData.get("attachment");
+
+  if (
+    !session.activeTenantId ||
+    !Number.isInteger(boardId) ||
+    !Number.isInteger(taskId)
+  ) {
+    boardsRedirect("Não foi possível anexar o ficheiro.", "error");
+  }
+
+  if (!(file instanceof File) || file.size <= 0) {
+    redirect(
+      boardTaskRedirectUrl({
+        boardId,
+        formData,
+        message: "Escolha um ficheiro para anexar.",
+        type: "error",
+      })
+    );
+  }
+
+  if (file.size > maxTaskAttachmentSize) {
+    redirect(
+      boardTaskRedirectUrl({
+        boardId,
+        formData,
+        message: "O ficheiro não pode exceder 25 MB.",
+        type: "error",
+      })
+    );
+  }
+
+  const membership = await db.tenantUser.findUnique({
+    where: {
+      userId_tenantId: {
+        userId: session.userId,
+        tenantId: session.activeTenantId,
+      },
+    },
+    select: {
+      tenantId: true,
+      tenant: {
+        select: {
+          deletedAt: true,
+        },
+      },
+    },
+  });
+
+  if (!membership || membership.tenant.deletedAt) {
+    boardsRedirect("Não tem acesso a esta organização.", "error");
+  }
+
+  const task = await findAccessibleTask({
+    boardId,
+    taskId,
+    tenantId: membership.tenantId,
+    userId: session.userId,
+    role: session.role,
+  });
+
+  if (!task) {
+    boardsRedirect("A tarefa não foi encontrada.", "error");
+  }
+
+  const fileName = file.name.slice(0, 255) || "anexo";
+  const contentType = file.type || "application/octet-stream";
+  const objectKey = getTaskAttachmentObjectKey({ fileName, taskId: task.id });
+  const body = Buffer.from(await file.arrayBuffer());
+
+  await uploadTaskAttachmentObject({
+    body,
+    contentType,
+    objectKey,
+  });
+
+  await db.taskAttachment.create({
+    data: {
+      taskId: task.id,
+      uploadedById: session.userId,
+      bucket: taskAttachmentBucket,
+      objectKey,
+      fileName,
+      contentType,
+      size: file.size,
+    },
+  });
+
+  redirect(
+    boardTaskRedirectUrl({
+      boardId: task.column?.boardId ?? boardId,
+      formData,
+      message: "Anexo adicionado.",
+    })
+  );
+}
+
+export async function deleteTaskAttachmentAction(formData: FormData) {
+  const session = await verifySession();
+  const boardId = Number(formData.get("boardId"));
+  const taskId = Number(formData.get("taskId"));
+  const attachmentId = Number(formData.get("attachmentId"));
+
+  if (
+    !session.activeTenantId ||
+    !Number.isInteger(boardId) ||
+    !Number.isInteger(taskId) ||
+    !Number.isInteger(attachmentId)
+  ) {
+    boardsRedirect("Não foi possível eliminar o anexo.", "error");
+  }
+
+  const membership = await db.tenantUser.findUnique({
+    where: {
+      userId_tenantId: {
+        userId: session.userId,
+        tenantId: session.activeTenantId,
+      },
+    },
+    select: {
+      tenantId: true,
+      tenant: {
+        select: {
+          deletedAt: true,
+        },
+      },
+    },
+  });
+
+  if (!membership || membership.tenant.deletedAt) {
+    boardsRedirect("Não tem acesso a esta organização.", "error");
+  }
+
+  const task = await findAccessibleTask({
+    boardId,
+    taskId,
+    tenantId: membership.tenantId,
+    userId: session.userId,
+    role: session.role,
+  });
+
+  if (!task) {
+    boardsRedirect("A tarefa não foi encontrada.", "error");
+  }
+
+  const attachment = await db.taskAttachment.findFirst({
+    where: {
+      id: attachmentId,
+      taskId: task.id,
+    },
+    select: {
+      id: true,
+      objectKey: true,
+    },
+  });
+
+  if (!attachment) {
+    boardsRedirect("O anexo não foi encontrado.", "error");
+  }
+
+  await db.taskAttachment.delete({
+    where: {
+      id: attachment.id,
+    },
+  });
+  await deleteTaskAttachmentObject(attachment.objectKey);
+
+  redirect(
+    boardTaskRedirectUrl({
+      boardId: task.column?.boardId ?? boardId,
+      formData,
+      message: "Anexo eliminado.",
+    })
+  );
+}
+
+export async function downloadTaskAttachmentAction(formData: FormData) {
+  const session = await verifySession();
+  const boardId = Number(formData.get("boardId"));
+  const taskId = Number(formData.get("taskId"));
+  const attachmentId = Number(formData.get("attachmentId"));
+
+  if (
+    !session.activeTenantId ||
+    !Number.isInteger(boardId) ||
+    !Number.isInteger(taskId) ||
+    !Number.isInteger(attachmentId)
+  ) {
+    boardsRedirect("Não foi possível descarregar o anexo.", "error");
+  }
+
+  const membership = await db.tenantUser.findUnique({
+    where: {
+      userId_tenantId: {
+        userId: session.userId,
+        tenantId: session.activeTenantId,
+      },
+    },
+    select: {
+      tenantId: true,
+      tenant: {
+        select: {
+          deletedAt: true,
+        },
+      },
+    },
+  });
+
+  if (!membership || membership.tenant.deletedAt) {
+    boardsRedirect("Não tem acesso a esta organização.", "error");
+  }
+
+  const task = await findAccessibleTask({
+    boardId,
+    taskId,
+    tenantId: membership.tenantId,
+    userId: session.userId,
+    role: session.role,
+  });
+
+  if (!task) {
+    boardsRedirect("A tarefa não foi encontrada.", "error");
+  }
+
+  const attachment = await db.taskAttachment.findFirst({
+    where: {
+      id: attachmentId,
+      taskId: task.id,
+    },
+    select: {
+      contentType: true,
+      fileName: true,
+      objectKey: true,
+    },
+  });
+
+  if (!attachment) {
+    boardsRedirect("O anexo não foi encontrado.", "error");
+  }
+
+  const url = await getTaskAttachmentDownloadUrl(attachment);
+
+  redirect(url);
 }
 
 export async function toggleTaskCompletedAction(formData: FormData) {

@@ -4,9 +4,12 @@ import { useState, type ReactNode } from "react"
 import {
   CalendarClock,
   CheckSquare,
+  Download,
+  File,
   List,
   MessageSquare,
   MoreHorizontal,
+  Paperclip,
   SlidersHorizontal,
   Tag,
   Trash2,
@@ -16,6 +19,9 @@ import {
 
 import {
   deleteTaskAction,
+  deleteTaskAttachmentAction,
+  downloadTaskAttachmentAction,
+  uploadTaskAttachmentAction,
   updateTaskAction,
 } from "@/app/(root)/boards/actions"
 import { DatePicker } from "@/components/date-picker"
@@ -68,6 +74,17 @@ export type TaskDialogTask = TaskCardTask & {
     stringValue: string | null
     integerValue: number | null
   }[]
+  attachments: {
+    id: number
+    fileName: string
+    contentType: string
+    size: number
+    createdAt: Date
+    uploadedBy: {
+      id: number
+      name: string
+    } | null
+  }[]
 }
 
 type TaskDialogProps = {
@@ -102,7 +119,13 @@ type TaskDialogProps = {
   trigger?: ReactNode
 }
 
-type TaskSectionId = "members" | "labels" | "dates" | "checklist" | "customFields"
+type TaskSectionId =
+  | "members"
+  | "labels"
+  | "dates"
+  | "checklist"
+  | "attachments"
+  | "customFields"
 
 const taskSections: Record<
   TaskSectionId,
@@ -132,6 +155,11 @@ const taskSections: Record<
     title: "Checklist",
     Icon: CheckSquare,
   },
+  attachments: {
+    button: "Anexos",
+    title: "Anexos",
+    Icon: Paperclip,
+  },
   customFields: {
     button: "Campos",
     title: "Campos personalizados",
@@ -148,6 +176,19 @@ function getInitials(name: string) {
       .map((part) => part[0]?.toUpperCase())
       .join("") || "U"
   )
+}
+
+function formatFileSize(bytes: number) {
+  const units = ["B", "KB", "MB", "GB"]
+  let size = bytes
+  let unitIndex = 0
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex += 1
+  }
+
+  return `${size >= 10 || unitIndex === 0 ? Math.round(size) : size.toFixed(1)} ${units[unitIndex]}`
 }
 
 export function TaskDialog({
@@ -177,6 +218,7 @@ export function TaskDialog({
       task.labels.length ? "labels" : null,
       task.startDate || task.dueDate ? "dates" : null,
       task.subTasks.length ? "checklist" : null,
+      task.attachments.length ? "attachments" : null,
       task.customFieldValues.length ? "customFields" : null,
     ].filter(Boolean) as TaskSectionId[]
   )
@@ -224,6 +266,44 @@ export function TaskDialog({
         className="max-h-[calc(100svh-2rem)] overflow-y-auto p-0 sm:max-w-5xl"
         showCloseButton={false}
       >
+        <form
+          id={`upload-task-attachment-${task.id}`}
+          action={uploadTaskAttachmentAction}
+          encType="multipart/form-data"
+        >
+          <input type="hidden" name="boardId" value={boardId} />
+          <input type="hidden" name="taskId" value={task.id} />
+          <BoardRedirectInput />
+        </form>
+        {task.attachments.map((attachment) => (
+          <span key={attachment.id} className="contents">
+            <form
+              id={`download-task-attachment-${attachment.id}`}
+              action={downloadTaskAttachmentAction}
+            >
+              <input type="hidden" name="boardId" value={boardId} />
+              <input type="hidden" name="taskId" value={task.id} />
+              <input
+                type="hidden"
+                name="attachmentId"
+                value={attachment.id}
+              />
+            </form>
+            <form
+              id={`delete-task-attachment-${attachment.id}`}
+              action={deleteTaskAttachmentAction}
+            >
+              <input type="hidden" name="boardId" value={boardId} />
+              <input type="hidden" name="taskId" value={task.id} />
+              <input
+                type="hidden"
+                name="attachmentId"
+                value={attachment.id}
+              />
+              <BoardRedirectInput />
+            </form>
+          </span>
+        ))}
         <form id={`delete-task-${task.id}`} action={deleteTaskAction}>
           <input type="hidden" name="boardId" value={boardId} />
           <input type="hidden" name="taskId" value={task.id} />
@@ -408,6 +488,16 @@ export function TaskDialog({
                         type="button"
                         variant="outline"
                         size="sm"
+                        disabled={activeSections.includes("attachments")}
+                        onClick={() => addSection("attachments")}
+                      >
+                        <Paperclip />
+                        {taskSections.attachments.button}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
                         disabled={activeSections.includes("members")}
                         onClick={() => addSection("members")}
                       >
@@ -532,6 +622,77 @@ export function TaskDialog({
                           completed: Boolean(subTask.completedAt),
                         }))}
                       />
+                    ) : null}
+                    {section === "attachments" ? (
+                      <div className="space-y-3">
+                        <div className="grid gap-2">
+                          <Label htmlFor={`task-attachment-${task.id}`}>
+                            Ficheiro
+                          </Label>
+                          <Input
+                            id={`task-attachment-${task.id}`}
+                            type="file"
+                            name="attachment"
+                            form={`upload-task-attachment-${task.id}`}
+                          />
+                          <Button
+                            type="submit"
+                            form={`upload-task-attachment-${task.id}`}
+                            variant="outline"
+                            size="sm"
+                            className="justify-self-start"
+                          >
+                            <Paperclip />
+                            Anexar ficheiro
+                          </Button>
+                        </div>
+                        {task.attachments.length ? (
+                          <div className="grid gap-2">
+                            {task.attachments.map((attachment) => (
+                              <div
+                                key={attachment.id}
+                                className="flex items-center gap-3 border border-border bg-background p-2"
+                              >
+                                <File className="size-4 shrink-0 text-muted-foreground" />
+                                <div className="min-w-0 flex-1">
+                                  <p className="truncate text-sm font-medium">
+                                    {attachment.fileName}
+                                  </p>
+                                  <p className="truncate text-xs text-muted-foreground">
+                                    {formatFileSize(attachment.size)}
+                                    {attachment.uploadedBy
+                                      ? ` por ${attachment.uploadedBy.name}`
+                                      : ""}
+                                  </p>
+                                </div>
+                                <Button
+                                  type="submit"
+                                  form={`download-task-attachment-${attachment.id}`}
+                                  variant="ghost"
+                                  size="icon-sm"
+                                  aria-label={`Descarregar ${attachment.fileName}`}
+                                >
+                                  <Download />
+                                </Button>
+                                <Button
+                                  type="submit"
+                                  form={`delete-task-attachment-${attachment.id}`}
+                                  variant="ghost"
+                                  size="icon-sm"
+                                  className="text-muted-foreground hover:text-destructive"
+                                  aria-label={`Eliminar ${attachment.fileName}`}
+                                >
+                                  <Trash2 />
+                                </Button>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-sm text-muted-foreground">
+                            Esta tarefa ainda não tem anexos.
+                          </p>
+                        )}
+                      </div>
                     ) : null}
                     {section === "customFields" ? (
                       boardCustomFields.length ? (

@@ -1,18 +1,19 @@
 model User {
-  id           Int      @id @default(autoincrement())
-  name         String   @db.VarChar(120)
-  email        String   @unique @db.VarChar(255)
-  passwordHash String   @map("password_hash") @db.VarChar(255)
-  role         UserRole @default(MEMBER)
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz
+  id Int @id @default(autoincrement())
+  name String @db.VarChar(120)
+  email String @unique @db.VarChar(255)
+  passwordHash String @map("password_hash") @db.VarChar(255)
+  role UserRole @default(MEMBER)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
   tenants TenantUser[]
-  teams   TeamUser[]
+  teams TeamUser[]
   sessions Session[]
   passwordResetTokens PasswordResetToken[]
-  tasks   Task[]       @relation("TaskCreatedBy")
+  tasks Task[] @relation("TaskCreatedBy")
   assignedTasks TaskAssignee[]
+  uploadedTaskAttachments TaskAttachment[] @relation("TaskAttachmentUploadedBy")
 
   @@map("user")
 }
