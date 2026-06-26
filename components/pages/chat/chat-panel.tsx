@@ -14,6 +14,7 @@ import {
   Users,
   Video,
 } from "lucide-react";
+import { useParams, usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 
 import { CallScreen } from "@/components/pages/chat/call-screen";
@@ -149,6 +150,24 @@ function getCallRoomId(roomScope: string, userId: number) {
   return `${roomScope}:calls:${userId}`;
 }
 
+function conversationIdToChatSlug(conversationId: string) {
+  if (conversationId.startsWith("private:")) {
+    return conversationId.slice("private:".length);
+  }
+
+  if (conversationId.startsWith("group:")) {
+    return conversationId.slice("group:".length);
+  }
+
+  return conversationId;
+}
+
+function chatSlugToConversationId(slug: string) {
+  // User ids are numeric; group ids are UUIDs — so a bare number is a private
+  // chat and anything else is a group.
+  return /^\d+$/.test(slug) ? `private:${slug}` : `group:${slug}`;
+}
+
 function getPresenceRoomId(roomScope: string) {
   return `${roomScope}:presence`;
 }
@@ -206,11 +225,26 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   const [micEnabled, setMicEnabled] = useState(true);
   const [cameraEnabled, setCameraEnabled] = useState(true);
   const [callChatOpen, setCallChatOpen] = useState(false);
-  const [callElapsedLabel, setCallElapsedLabel] = useState("");
-  const [selectedConversationId, setSelectedConversationId] = useState(
-    members[0] ? getPrivateConversationId(members[0].id) : null
-  );
+  const [, setCallTick] = useState(0);
   const [, startTransition] = useTransition();
+  const router = useRouter();
+  const pathname = usePathname();
+  const params = useParams();
+  const chatIdSlug = Array.isArray(params.chatId)
+    ? params.chatId[0]
+    : typeof params.chatId === "string"
+      ? params.chatId
+      : null;
+  const selectedConversationId = chatIdSlug
+    ? chatSlugToConversationId(chatIdSlug)
+    : null;
+  const selectConversation = useCallback(
+    (conversationId: string) => {
+      setDraft("");
+      router.push(`/chat/${conversationIdToChatSlug(conversationId)}`);
+    },
+    [router]
+  );
   const activeCallRef = useRef<ActiveCall | null>(null);
   const callConnectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
   const callRefsRef = useRef<Record<number, ChatPeerCall>>({});
@@ -306,6 +340,9 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     () => (activeCall ? messagesByRoom[activeCall.conversationRoomId] ?? [] : []),
     [activeCall, messagesByRoom]
   );
+  // Recomputed on every callTick (1s interval) while connected; "" otherwise.
+  const callElapsedLabel =
+    activeCall?.status === "connected" ? formatCallDuration(activeCall.startedAt) : "";
 
   const toggleMic = useCallback(() => {
     const tracks = localStreamRef.current?.getAudioTracks() ?? [];
@@ -448,10 +485,10 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
       return nextMessagesByRoom;
     });
 
-    if (selectedConversationId === getGroupConversationId(groupId)) {
-      setSelectedConversationId(members[0] ? getPrivateConversationId(members[0].id) : null);
+    if (selectedConversationId === getGroupConversationId(groupId) && members[0]) {
+      selectConversation(getPrivateConversationId(members[0].id));
     }
-  }, [members, roomScope, selectedConversationId]);
+  }, [members, roomScope, selectConversation, selectedConversationId]);
 
   function getCandidateKey(callId: string, memberId: number) {
     return `${callId}:${memberId}`;
@@ -543,7 +580,14 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     setActiveCall(null);
     setLocalStream(null);
     setRemoteStreamsByUserId({});
-  }, [clearCallRingTimeout, stopIncomingRing, stopOutgoingRing]);
+    setMicEnabled(true);
+    setCameraEnabled(true);
+    setCallChatOpen(false);
+
+    if (typeof window !== "undefined" && window.location.pathname.endsWith("/call")) {
+      router.replace(window.location.pathname.slice(0, -"/call".length));
+    }
+  }, [clearCallRingTimeout, router, stopIncomingRing, stopOutgoingRing]);
 
   const removePeer = useCallback((memberId: number) => {
     const peerCall = callRefsRef.current[memberId];
@@ -799,6 +843,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
 
     activeCallRef.current = nextCall;
     setActiveCall(nextCall);
+    router.push(`/chat/${conversationIdToChatSlug(selectedConversation.id)}/call`);
     stopOutgoingRing();
     outgoingRingRef.current = playIncomingCallLoop();
     clearCallRingTimeout();
@@ -900,7 +945,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
         conversations.find((conversation) => conversation.id === getPrivateConversationId(signal.fromUserId));
 
       if (incomingConversation) {
-        setSelectedConversationId(incomingConversation.id);
+        router.push(`/chat/${conversationIdToChatSlug(incomingConversation.id)}/call`);
       }
 
       const participantIds = getCallParticipantIds(signal);
@@ -963,6 +1008,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
       endActiveCall,
       getCallParticipantIds,
       roomScope,
+      router,
       showPanelError,
       stopIncomingRing,
       user.id,
@@ -1210,12 +1256,9 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
       answerPeerOffer,
       clearCallRingTimeout,
       clearIncomingCallTimeout,
-      clearActiveCall,
-      createSignalBase,
       flushIceCandidates,
       showIncomingCall,
       screenPopup,
-      sendCallSignal,
       stopIncomingRing,
       stopOutgoingRing,
       user.id,
@@ -1354,32 +1397,19 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   }, [remoteStreamsByUserId]);
 
   useEffect(() => {
-    if (!localStream) {
-      setMicEnabled(true);
-      setCameraEnabled(true);
-      return;
+    // A /call URL opened with no active call (stale link, refresh) falls back to
+    // the conversation. Live calls keep the URL via clearActiveCall on hangup.
+    if (!activeCallRef.current && pathname?.endsWith("/call") && chatIdSlug) {
+      router.replace(`/chat/${chatIdSlug}`);
     }
-
-    setMicEnabled(localStream.getAudioTracks().some((track) => track.enabled));
-    setCameraEnabled(localStream.getVideoTracks().some((track) => track.enabled));
-  }, [localStream]);
-
-  useEffect(() => {
-    if (!activeCall) {
-      setCallChatOpen(false);
-    }
-  }, [activeCall]);
+  }, [chatIdSlug, pathname, router]);
 
   useEffect(() => {
     if (!activeCall || activeCall.status !== "connected") {
-      setCallElapsedLabel("");
       return;
     }
 
-    const update = () => setCallElapsedLabel(formatCallDuration(activeCall.startedAt));
-
-    update();
-    const interval = setInterval(update, 1000);
+    const interval = setInterval(() => setCallTick((tick) => tick + 1), 1000);
 
     return () => clearInterval(interval);
   }, [activeCall]);
@@ -1437,7 +1467,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     setGroupDraftName("");
     setGroupDraftMemberIds([]);
     setShowGroupForm(false);
-    setSelectedConversationId(getGroupConversationId(group.id));
+    selectConversation(getGroupConversationId(group.id));
   }
 
   function deleteOrLeaveGroup(group: ChatGroup) {
@@ -1717,10 +1747,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
                       "flex min-w-0 flex-1 items-center gap-3 px-2 py-2 text-left",
                       membersCollapsed && "justify-center px-0"
                     )}
-                    onClick={() => {
-                      setDraft("");
-                      setSelectedConversationId(conversation.id);
-                    }}
+                    onClick={() => selectConversation(conversation.id)}
                   >
                     {conversation.kind === "group" ? (
                       <span className="grid size-8 shrink-0 place-items-center border border-border bg-muted text-muted-foreground">
