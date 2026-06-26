@@ -2,6 +2,7 @@
 
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import { ListFilter } from "lucide-react";
 
 import {
   createTaskAction,
@@ -91,6 +92,12 @@ type BoardCalendarProps = {
 };
 
 type CalendarTaskStatusFilter = "all" | "open" | "completed";
+
+const calendarStatusLabels: Record<CalendarTaskStatusFilter, string> = {
+  all: "Todas",
+  open: "Por concluir",
+  completed: "Concluidas",
+};
 
 type BoardCalendarDragPayload = {
   type: "board-calendar-task-date";
@@ -412,6 +419,7 @@ function BoardCalendarFilters({
       <PopoverTrigger
         render={<Button type="button" variant="outline" size="sm" />}
       >
+        <ListFilter />
         Filtrar{activeFilterCount ? ` (${activeFilterCount})` : ""}
       </PopoverTrigger>
       <PopoverContent className="w-80 p-3" align="end">
@@ -466,7 +474,7 @@ function BoardCalendarFilters({
               }}
             >
               <SelectTrigger className="w-full">
-                <SelectValue />
+                <SelectValue>{calendarStatusLabels[statusFilter]}</SelectValue>
               </SelectTrigger>
               <SelectContent align="end">
                 <SelectGroup>
@@ -543,7 +551,9 @@ function AddCalendarTaskSheet({
                   className="w-full"
                   style={{ borderLeft: `3px solid ${selectedColumn.color}` }}
                 >
-                  <SelectValue placeholder="Selecionar coluna" />
+                  <SelectValue placeholder="Selecionar coluna">
+                    {selectedColumn.name}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent align="start">
                   <SelectGroup>
