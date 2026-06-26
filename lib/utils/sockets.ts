@@ -18,6 +18,15 @@ export type ChatMessage = {
   createdAt: string;
 };
 
+export type ChatGroup = {
+  id: string;
+  roomScope: string;
+  name: string;
+  memberIds: number[];
+  createdByUserId: number;
+  createdAt: string;
+};
+
 export type ChatCallKind = "audio" | "video";
 
 export type ChatCallSignal =
@@ -81,6 +90,10 @@ export type ChatSocketEvent =
   | {
       type: "chat:signal";
       signal: ChatCallSignal;
+    }
+  | {
+      type: "chat:group";
+      group: ChatGroup;
     };
 
 type ChatSocketOptions = {
@@ -89,6 +102,7 @@ type ChatSocketOptions = {
   url?: string;
   announcePresence?: boolean;
   onMessage: (message: ChatMessage) => void;
+  onGroup?: (group: ChatGroup) => void;
   onPresenceChange?: (user: ChatSocketUser, online: boolean) => void;
   onSignal?: (signal: ChatCallSignal) => void;
   onStatusChange?: (status: ChatSocketStatus) => void;
@@ -97,6 +111,7 @@ type ChatSocketOptions = {
 type ChatSocketConnection = {
   close: () => void;
   send: (message: ChatMessage) => void;
+  sendGroup: (group: ChatGroup) => void;
   sendSignal: (signal: ChatCallSignal) => void;
 };
 
@@ -110,7 +125,8 @@ function parseSocketEvent(value: string): ChatSocketEvent | null {
       event.type === "chat:join" ||
       event.type === "chat:leave" ||
       event.type === "chat:message" ||
-      event.type === "chat:signal"
+      event.type === "chat:signal" ||
+      event.type === "chat:group"
     ) {
       return event as ChatSocketEvent;
     }
@@ -155,6 +171,7 @@ function connectChatSocket({
   url,
   announcePresence,
   onMessage,
+  onGroup,
   onPresenceChange,
   onSignal,
   onStatusChange,
@@ -189,6 +206,11 @@ function connectChatSocket({
 
     if (event.type === "chat:signal" && event.signal.roomId === roomId) {
       onSignal?.(event.signal);
+      return;
+    }
+
+    if (event.type === "chat:group") {
+      onGroup?.(event.group);
     }
   }
 
@@ -341,6 +363,27 @@ function connectChatSocket({
           "Content-Type": "application/json",
         },
         body: JSON.stringify(message),
+      });
+    },
+    sendGroup: (group) => {
+      const event = {
+        type: "chat:group",
+        group,
+      } satisfies ChatSocketEvent;
+      const serializedEvent = JSON.stringify(event);
+
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(serializedEvent);
+        return;
+      }
+
+      fallbackChannel?.postMessage(event);
+      void fetch("/api/chat/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: serializedEvent,
       });
     },
     sendSignal: (signal) => {
