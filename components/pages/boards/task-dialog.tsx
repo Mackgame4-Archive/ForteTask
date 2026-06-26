@@ -652,6 +652,7 @@ export function TaskDialog({
                                   </p>
                                 </div>
                                 <Button
+                                  nativeButton={false}
                                   render={
                                     <a
                                       href={`/api/boards/${boardId}/tasks/${task.id}/attachments/${attachment.id}/download`}
