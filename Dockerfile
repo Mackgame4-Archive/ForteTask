@@ -18,7 +18,10 @@ RUN pnpm install --frozen-lockfile
 COPY . .
 
 # Build arguments
-ARG DATABASE_URL
+# prisma generate / next build only need this var to resolve at config-load time;
+# they don't actually connect to the DB. A placeholder is enough for the build.
+# Override at build with --build-arg DATABASE_URL=... if a real connection is needed.
+ARG DATABASE_URL="postgresql://user:password@localhost:5432/db?schema=public"
 ENV DATABASE_URL=$DATABASE_URL
 
 ARG APP_PORT=3000

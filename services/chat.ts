@@ -63,7 +63,7 @@ async function getChatPageData() {
         });
 
   return {
-    members: members.map((member) => ("user" in member ? member.user : member)),
+    members,
     session,
   };
 }

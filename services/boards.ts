@@ -368,6 +368,20 @@ export async function getBoardPageData(boardId: string) {
     return null;
   }
 
+  // Tasks are nested under their column, so columnId is always the parent
+  // column's id. Prisma types it as nullable (Int?), so normalize it here to
+  // satisfy the non-null columnId expected by the board view components.
+  const normalizedBoard = {
+    ...board,
+    columns: board.columns.map((column) => ({
+      ...column,
+      tasks: column.tasks.map((task) => ({
+        ...task,
+        columnId: column.id,
+      })),
+    })),
+  };
+
   return {
     session,
     canManage,
@@ -379,8 +393,8 @@ export async function getBoardPageData(boardId: string) {
           sensitivity: "base",
         })
       ),
-    board,
-    totalTasks: board.columns.reduce(
+    board: normalizedBoard,
+    totalTasks: normalizedBoard.columns.reduce(
       (count, column) => count + column.tasks.length,
       0
     ),
