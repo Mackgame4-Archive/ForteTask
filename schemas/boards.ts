@@ -209,11 +209,33 @@ export const deleteTaskSchema = z.object({
   taskId: z.coerce.number().int().positive(),
 });
 
+export const createTaskCommentSchema = z.object({
+  boardId: z.coerce.number().int().positive(),
+  taskId: z.coerce.number().int().positive(),
+  body: z.string().trim().min(1).max(2000),
+});
+
 export const toggleTaskCompletedSchema = z.object({
   boardId: z.coerce.number().int().positive(),
   taskId: z.coerce.number().int().positive(),
   completed: z.preprocess((value) => value === "true", z.boolean()),
 });
+
+export const updateTaskDatesSchema = z
+  .object({
+    boardId: z.coerce.number().int().positive(),
+    taskId: z.coerce.number().int().positive(),
+    edge: z.enum(["start", "end"]),
+    targetDate: z.string().regex(dateInputPattern),
+  })
+  .transform((data) => ({
+    ...data,
+    targetDate: combineDateAndTimeInput(data.targetDate),
+  }))
+  .refine((data) => Boolean(data.targetDate), {
+    path: ["targetDate"],
+    message: "Choose a valid date.",
+  });
 
 export const moveTaskSchema = z.object({
   boardId: z.coerce.number().int().positive(),
@@ -239,5 +261,6 @@ export type CreateTaskInput = z.infer<typeof createTaskSchema>;
 export type UpdateTaskInput = z.infer<typeof updateTaskSchema>;
 export type DeleteTaskInput = z.infer<typeof deleteTaskSchema>;
 export type ToggleTaskCompletedInput = z.infer<typeof toggleTaskCompletedSchema>;
+export type UpdateTaskDatesInput = z.infer<typeof updateTaskDatesSchema>;
 export type MoveTaskInput = z.infer<typeof moveTaskSchema>;
 export type MoveColumnInput = z.infer<typeof moveColumnSchema>;

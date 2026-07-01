@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode, useMemo, useState } from "react";
+import { type DragEvent, type ReactNode, useMemo, useState } from "react";
 import {
   addMonths,
   eachDayOfInterval,
@@ -39,13 +39,50 @@ export type CalendarItem = {
 type TaskCalendarProps<TItem extends CalendarItem = CalendarItem> = {
   items: TItem[];
   summary?: ReactNode;
-  renderItem?: (item: TItem) => ReactNode;
+  headerActions?: ReactNode;
+  canDropOnDay?: (payload: Record<string, unknown>, day: Date) => boolean;
+  onDayDrop?: (payload: Record<string, unknown>, day: Date) => void;
+  onDayDoubleClick?: (day: Date) => void;
+  renderItem?: (item: TItem, context: CalendarItemRenderContext) => ReactNode;
 };
 
 type CalendarItemWithRange<TItem extends CalendarItem> = TItem & {
   startsAt: Date;
   endsAt: Date;
 };
+
+export type CalendarItemRenderContext = {
+  day: Date;
+  endsAt: Date;
+  position: "single" | "start" | "middle" | "end";
+  startsAt: Date;
+};
+
+function readCalendarDragPayload(event: DragEvent) {
+  const rawValue =
+    event.dataTransfer.getData("application/x-drag-payload") ||
+    event.dataTransfer.getData("text/plain");
+
+  if (!rawValue) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(rawValue);
+
+    return payload && typeof payload === "object"
+      ? (payload as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function hasCalendarDragPayload(event: DragEvent) {
+  return Array.from(event.dataTransfer.types).some(
+    (type) => type === "application/x-drag-payload" || type === "text/plain"
+  );
+}
 
 function parseItemDate(value: CalendarItem["startDate"]) {
   return parseDateValue(value);
@@ -88,9 +125,35 @@ function isItemOnDay<TItem extends CalendarItem>(
   return dayStart >= start && dayStart <= end;
 }
 
+function getItemPositionOnDay<TItem extends CalendarItem>(
+  item: CalendarItemWithRange<TItem>,
+  day: Date
+): CalendarItemRenderContext["position"] {
+  const startsOnDay = isSameDay(day, item.startsAt);
+  const endsOnDay = isSameDay(day, item.endsAt);
+
+  if (startsOnDay && endsOnDay) {
+    return "single";
+  }
+
+  if (startsOnDay) {
+    return "start";
+  }
+
+  if (endsOnDay) {
+    return "end";
+  }
+
+  return "middle";
+}
+
 function TaskCalendar<TItem extends CalendarItem = CalendarItem>({
   items,
   summary,
+  headerActions,
+  canDropOnDay,
+  onDayDrop,
+  onDayDoubleClick,
   renderItem,
 }: TaskCalendarProps<TItem>) {
   const [visibleMonth, setVisibleMonth] = useState(() => startOfMonth(new Date()));
@@ -141,7 +204,7 @@ function TaskCalendar<TItem extends CalendarItem = CalendarItem>({
 
   return (
     <Card className="gap-0 overflow-hidden border-x border-t border-foreground/10 py-0 ring-0">
-      <div className="flex flex-col gap-3 border-b border-border px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-3 border-b border-border px-4 py-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
             <PopoverTrigger
@@ -173,7 +236,11 @@ function TaskCalendar<TItem extends CalendarItem = CalendarItem>({
             {summary ?? `${items.length} itens agendados`}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-end">
+          {headerActions ? (
+            <div className="flex flex-wrap items-center gap-2">{headerActions}</div>
+          ) : null}
+          <div className="flex shrink-0 items-center gap-2">
           <Button
             type="button"
             variant="outline"
@@ -205,6 +272,7 @@ function TaskCalendar<TItem extends CalendarItem = CalendarItem>({
           >
             <ChevronRight />
           </Button>
+          </div>
         </div>
       </div>
 
@@ -235,6 +303,34 @@ function TaskCalendar<TItem extends CalendarItem = CalendarItem>({
                   "min-h-28 border-b border-r border-border bg-background p-2 nth-[7n]:border-r-0",
                   !isSameMonth(day, visibleMonth) && "bg-muted/30 text-muted-foreground"
                 )}
+                onDragOver={
+                  onDayDrop
+                    ? (event) => {
+                        if (!hasCalendarDragPayload(event)) {
+                          event.dataTransfer.dropEffect = "none";
+                          return;
+                        }
+
+                        event.preventDefault();
+                        event.dataTransfer.dropEffect = "move";
+                      }
+                    : undefined
+                }
+                onDrop={
+                  onDayDrop
+                    ? (event) => {
+                        const payload = readCalendarDragPayload(event);
+
+                        if (!payload || canDropOnDay?.(payload, day) === false) {
+                          return;
+                        }
+
+                        event.preventDefault();
+                        onDayDrop(payload, day);
+                      }
+                    : undefined
+                }
+                onDoubleClick={() => onDayDoubleClick?.(day)}
               >
                 <div className="mb-2 flex items-center justify-between">
                   <span
@@ -249,8 +345,20 @@ function TaskCalendar<TItem extends CalendarItem = CalendarItem>({
                 </div>
                 <div className="space-y-1">
                   {visibleItems.map((item) => (
-                    <div key={`${day.toISOString()}-${item.id}`}>
-                      {renderItem ? renderItem(item) : <CalendarDefaultItem item={item} />}
+                    <div
+                      key={`${day.toISOString()}-${item.id}`}
+                      onDoubleClick={(event) => event.stopPropagation()}
+                    >
+                      {renderItem ? (
+                        renderItem(item, {
+                          day,
+                          endsAt: item.endsAt,
+                          position: getItemPositionOnDay(item, day),
+                          startsAt: item.startsAt,
+                        })
+                      ) : (
+                        <CalendarDefaultItem item={item} />
+                      )}
                     </div>
                   ))}
                   {hiddenItemCount > 0 ? (

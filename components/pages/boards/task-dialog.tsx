@@ -4,9 +4,12 @@ import { useState, type ReactNode } from "react"
 import {
   CalendarClock,
   CheckSquare,
+  Download,
+  File,
   List,
   MessageSquare,
   MoreHorizontal,
+  Paperclip,
   SlidersHorizontal,
   Tag,
   Trash2,
@@ -15,7 +18,10 @@ import {
 } from "lucide-react"
 
 import {
+  createTaskCommentAction,
   deleteTaskAction,
+  deleteTaskAttachmentAction,
+  uploadTaskAttachmentAction,
   updateTaskAction,
 } from "@/app/(root)/boards/actions"
 import { DatePicker } from "@/components/date-picker"
@@ -23,6 +29,7 @@ import { Checklist } from "@/components/checklist"
 import { InlineEditableField } from "@/components/ui/inline-editable-field"
 import { MarkdownEditor } from "@/components/markdown-editor"
 import { Multiselect } from "@/components/multiselect"
+import { BoardRedirectInput } from "@/components/pages/boards/board-redirect-input"
 import TaskCard, { type TaskCardTask } from "@/components/pages/boards/task-card"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -51,7 +58,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { formatTimeInputValue } from "@/lib/utils/date"
+import { Textarea } from "@/components/ui/textarea"
+import { formatAppDate, formatTimeInputValue } from "@/lib/utils/date"
 import type { LucideIcon } from "lucide-react"
 
 export type TaskDialogTask = TaskCardTask & {
@@ -66,6 +74,39 @@ export type TaskDialogTask = TaskCardTask & {
     customFieldId: number
     stringValue: string | null
     integerValue: number | null
+  }[]
+  attachments: {
+    id: number
+    fileName: string
+    contentType: string
+    size: number
+    createdAt: Date
+    uploadedBy: {
+      id: number
+      name: string
+    } | null
+  }[]
+  comments: {
+    id: number
+    body: string
+    createdAt: Date
+    updatedAt: Date
+    author: {
+      id: number
+      name: string
+      email: string
+    } | null
+  }[]
+  activities: {
+    id: number
+    type: string
+    message: string
+    createdAt: Date
+    actor: {
+      id: number
+      name: string
+      email: string
+    } | null
   }[]
 }
 
@@ -101,7 +142,13 @@ type TaskDialogProps = {
   trigger?: ReactNode
 }
 
-type TaskSectionId = "members" | "labels" | "dates" | "checklist" | "customFields"
+type TaskSectionId =
+  | "members"
+  | "labels"
+  | "dates"
+  | "checklist"
+  | "attachments"
+  | "customFields"
 
 const taskSections: Record<
   TaskSectionId,
@@ -131,6 +178,11 @@ const taskSections: Record<
     title: "Checklist",
     Icon: CheckSquare,
   },
+  attachments: {
+    button: "Anexos",
+    title: "Anexos",
+    Icon: Paperclip,
+  },
   customFields: {
     button: "Campos",
     title: "Campos personalizados",
@@ -147,6 +199,23 @@ function getInitials(name: string) {
       .map((part) => part[0]?.toUpperCase())
       .join("") || "U"
   )
+}
+
+function formatFileSize(bytes: number) {
+  const units = ["B", "KB", "MB", "GB"]
+  let size = bytes
+  let unitIndex = 0
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex += 1
+  }
+
+  return `${size >= 10 || unitIndex === 0 ? Math.round(size) : size.toFixed(1)} ${units[unitIndex]}`
+}
+
+function formatTimelineDate(date: Date) {
+  return formatAppDate(date, "dd MMM yyyy HH:mm")
 }
 
 export function TaskDialog({
@@ -176,12 +245,31 @@ export function TaskDialog({
       task.labels.length ? "labels" : null,
       task.startDate || task.dueDate ? "dates" : null,
       task.subTasks.length ? "checklist" : null,
+      task.attachments.length ? "attachments" : null,
       task.customFieldValues.length ? "customFields" : null,
     ].filter(Boolean) as TaskSectionId[]
   )
   const customFieldValueById = new Map(
     task.customFieldValues.map((value) => [value.customFieldId, value])
   )
+  const timelineItems = [
+    ...task.comments.map((comment) => ({
+      kind: "comment" as const,
+      id: comment.id,
+      body: comment.body,
+      createdAt: comment.createdAt,
+      name: comment.author?.name ?? "Utilizador removido",
+      email: comment.author?.email,
+    })),
+    ...task.activities.map((activity) => ({
+      kind: "activity" as const,
+      id: activity.id,
+      message: activity.message,
+      createdAt: activity.createdAt,
+      name: activity.actor?.name ?? "Sistema",
+      email: activity.actor?.email,
+    })),
+  ].sort((first, second) => second.createdAt.getTime() - first.createdAt.getTime())
 
   function addSection(section: TaskSectionId) {
     setActiveSections((currentSections) =>
@@ -223,9 +311,43 @@ export function TaskDialog({
         className="max-h-[calc(100svh-2rem)] overflow-y-auto p-0 sm:max-w-5xl"
         showCloseButton={false}
       >
+        <form
+          id={`upload-task-attachment-${task.id}`}
+          action={uploadTaskAttachmentAction}
+        >
+          <input type="hidden" name="boardId" value={boardId} />
+          <input type="hidden" name="taskId" value={task.id} />
+          <BoardRedirectInput />
+        </form>
+        <form
+          id={`create-task-comment-${task.id}`}
+          action={createTaskCommentAction}
+        >
+          <input type="hidden" name="boardId" value={boardId} />
+          <input type="hidden" name="taskId" value={task.id} />
+          <BoardRedirectInput />
+        </form>
+        {task.attachments.map((attachment) => (
+          <span key={attachment.id} className="contents">
+            <form
+              id={`delete-task-attachment-${attachment.id}`}
+              action={deleteTaskAttachmentAction}
+            >
+              <input type="hidden" name="boardId" value={boardId} />
+              <input type="hidden" name="taskId" value={task.id} />
+              <input
+                type="hidden"
+                name="attachmentId"
+                value={attachment.id}
+              />
+              <BoardRedirectInput />
+            </form>
+          </span>
+        ))}
         <form id={`delete-task-${task.id}`} action={deleteTaskAction}>
           <input type="hidden" name="boardId" value={boardId} />
           <input type="hidden" name="taskId" value={task.id} />
+          <BoardRedirectInput />
           <button
             id={`delete-task-submit-${task.id}`}
             type="submit"
@@ -236,6 +358,7 @@ export function TaskDialog({
         <form action={updateTaskAction}>
           <input type="hidden" name="boardId" value={boardId} />
           <input type="hidden" name="taskId" value={task.id} />
+          <BoardRedirectInput />
           {boardCustomFields.map((field) => {
             const value = customFieldValueById.get(field.id)
             const fieldValue =
@@ -405,6 +528,16 @@ export function TaskDialog({
                         type="button"
                         variant="outline"
                         size="sm"
+                        disabled={activeSections.includes("attachments")}
+                        onClick={() => addSection("attachments")}
+                      >
+                        <Paperclip />
+                        {taskSections.attachments.button}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
                         disabled={activeSections.includes("members")}
                         onClick={() => addSection("members")}
                       >
@@ -530,6 +663,81 @@ export function TaskDialog({
                         }))}
                       />
                     ) : null}
+                    {section === "attachments" ? (
+                      <div className="space-y-3">
+                        <div className="grid gap-2">
+                          <Label htmlFor={`task-attachment-${task.id}`}>
+                            Ficheiro
+                          </Label>
+                          <Input
+                            id={`task-attachment-${task.id}`}
+                            type="file"
+                            name="attachment"
+                            form={`upload-task-attachment-${task.id}`}
+                          />
+                          <Button
+                            type="submit"
+                            form={`upload-task-attachment-${task.id}`}
+                            variant="outline"
+                            size="sm"
+                            className="justify-self-start"
+                          >
+                            <Paperclip />
+                            Anexar ficheiro
+                          </Button>
+                        </div>
+                        {task.attachments.length ? (
+                          <div className="grid gap-2">
+                            {task.attachments.map((attachment) => (
+                              <div
+                                key={attachment.id}
+                                className="flex items-center gap-3 border border-border bg-background p-2"
+                              >
+                                <File className="size-4 shrink-0 text-muted-foreground" />
+                                <div className="min-w-0 flex-1">
+                                  <p className="truncate text-sm font-medium">
+                                    {attachment.fileName}
+                                  </p>
+                                  <p className="truncate text-xs text-muted-foreground">
+                                    {formatFileSize(attachment.size)}
+                                    {attachment.uploadedBy
+                                      ? ` por ${attachment.uploadedBy.name}`
+                                      : ""}
+                                  </p>
+                                </div>
+                                <Button
+                                  nativeButton={false}
+                                  render={
+                                    <a
+                                      href={`/api/boards/${boardId}/tasks/${task.id}/attachments/${attachment.id}/download`}
+                                    />
+                                  }
+                                  variant="ghost"
+                                  size="icon-sm"
+                                  aria-label={`Descarregar ${attachment.fileName}`}
+                                >
+                                  <Download />
+                                </Button>
+                                <Button
+                                  type="submit"
+                                  form={`delete-task-attachment-${attachment.id}`}
+                                  variant="ghost"
+                                  size="icon-sm"
+                                  className="text-muted-foreground hover:text-destructive"
+                                  aria-label={`Eliminar ${attachment.fileName}`}
+                                >
+                                  <Trash2 />
+                                </Button>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-sm text-muted-foreground">
+                            Esta tarefa ainda não tem anexos.
+                          </p>
+                        )}
+                      </div>
+                    ) : null}
                     {section === "customFields" ? (
                       boardCustomFields.length ? (
                         <div className="grid gap-3">
@@ -608,21 +816,64 @@ export function TaskDialog({
                   <MessageSquare className="size-5 text-muted-foreground" />
                   Comentários e atividades
                 </div>
-                <Button type="button" variant="outline" size="sm">
-                  Mostrar detalhes
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor={`task-comment-${task.id}`} className="sr-only">
+                  Escrever comentário
+                </Label>
+                <Textarea
+                  id={`task-comment-${task.id}`}
+                  name="body"
+                  form={`create-task-comment-${task.id}`}
+                  placeholder="Escrever um comentário..."
+                  maxLength={2000}
+                  className="min-h-20 bg-card"
+                />
+                <Button
+                  type="submit"
+                  form={`create-task-comment-${task.id}`}
+                  size="sm"
+                >
+                  Comentar
                 </Button>
               </div>
-              <Input readOnly value="" placeholder="Escrever um comentário..." />
-              <div className="flex gap-3 text-sm">
-                <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
-                  {getInitials(displayName)}
-                </span>
-                <p className="text-muted-foreground">
-                  <span className="font-semibold text-foreground">
-                    {displayName}
-                  </span>{" "}
-                  adicionou este cartão a {columnName}
-                </p>
+              <div className="space-y-4">
+                {timelineItems.length ? (
+                  timelineItems.map((item) => (
+                    <div key={`${item.kind}-${item.id}`} className="flex gap-3 text-sm">
+                      <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+                        {getInitials(item.name)}
+                      </span>
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <p className="text-xs text-muted-foreground">
+                          <span className="font-semibold text-foreground">
+                            {item.name}
+                          </span>{" "}
+                          {formatTimelineDate(item.createdAt)}
+                        </p>
+                        {item.kind === "comment" ? (
+                          <p className="whitespace-pre-wrap break-words rounded-none border border-border bg-card p-3">
+                            {item.body}
+                          </p>
+                        ) : (
+                          <p className="text-muted-foreground">{item.message}</p>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="flex gap-3 text-sm">
+                    <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+                      {getInitials(displayName)}
+                    </span>
+                    <p className="text-muted-foreground">
+                      <span className="font-semibold text-foreground">
+                        {displayName}
+                      </span>{" "}
+                      adicionou este cartão a {columnName}
+                    </p>
+                  </div>
+                )}
               </div>
             </aside>
           </div>

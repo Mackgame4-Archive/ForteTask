@@ -3,35 +3,58 @@
 import {
   ChevronsLeft,
   ChevronsRight,
+  LogOut,
+  MoreHorizontal,
   Phone,
   PhoneOff,
   Plus,
   SendHorizontal,
+  Trash2,
   UserRound,
   Users,
   Video,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, useTransition } from "react";
-import { toast } from "sonner";
+import { useParams, usePathname, useRouter } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 
+import { CallScreen } from "@/components/pages/chat/call-screen";
 import { MessageBubble } from "@/components/pages/chat/message-bubble";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogMedia,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   connectChatSocket,
   createChatMessage,
   type ChatCallKind,
+  type ChatCallPresence,
   type ChatCallSignal,
   type ChatGroup,
   type ChatMessage,
   type ChatSocketUser,
 } from "@/lib/utils/sockets";
+import { playCallEndSound, playIncomingCallLoop } from "@/lib/utils/audio";
 import {
   createCallId,
+  createChatLocalStream,
   createChatPeerCall,
   type ChatPeerCall,
 } from "@/lib/utils/webrtc";
@@ -53,10 +76,18 @@ type ChatPanelProps = {
 
 type ActiveCall = {
   callId: string;
+  conversationRoomId: string;
   conversationTitle: string;
   kind: ChatCallKind;
   memberIds: number[];
+  startedAt: number;
   status: "calling" | "connected" | "ringing";
+};
+
+// Who is currently in a given conversation's call room, plus the call's kind.
+type CallPresence = {
+  kind: ChatCallKind;
+  users: ChatSocketUser[];
 };
 
 type OutgoingCallSignal =
@@ -84,6 +115,7 @@ type ChatConversation =
       memberIds: number[];
       group: ChatGroup;
     };
+
 
 function getInitials(name: string) {
   return (
@@ -122,6 +154,28 @@ function getCallRoomId(roomScope: string, userId: number) {
   return `${roomScope}:calls:${userId}`;
 }
 
+function getCallsPresenceRoomId(roomScope: string) {
+  return `${roomScope}:calls-presence`;
+}
+
+function conversationIdToChatSlug(conversationId: string) {
+  if (conversationId.startsWith("private:")) {
+    return conversationId.slice("private:".length);
+  }
+
+  if (conversationId.startsWith("group:")) {
+    return conversationId.slice("group:".length);
+  }
+
+  return conversationId;
+}
+
+function chatSlugToConversationId(slug: string) {
+  // User ids are numeric; group ids are UUIDs — so a bare number is a private
+  // chat and anything else is a group.
+  return /^\d+$/.test(slug) ? `private:${slug}` : `group:${slug}`;
+}
+
 function getPresenceRoomId(roomScope: string) {
   return `${roomScope}:presence`;
 }
@@ -154,6 +208,14 @@ function getCallErrorMessage(error: unknown) {
   return error.message || "Nao foi possivel iniciar a chamada.";
 }
 
+function formatCallDuration(startedAt: number, endedAt = Date.now()) {
+  const totalSeconds = Math.max(0, Math.round((endedAt - startedAt) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
 function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   const [activeCall, setActiveCall] = useState<ActiveCall | null>(null);
   const [draft, setDraft] = useState("");
@@ -162,26 +224,58 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   const [groups, setGroups] = useState<ChatGroup[]>([]);
   const [showGroupForm, setShowGroupForm] = useState(false);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [panelError, setPanelError] = useState<string | null>(null);
+  const [panelErrorTitle, setPanelErrorTitle] = useState("Erro");
   const [membersCollapsed, setMembersCollapsed] = useState(false);
   const [messagesByRoom, setMessagesByRoom] = useState<Record<string, ChatMessage[]>>({});
   const [onlineMemberIds, setOnlineMemberIds] = useState<Set<number>>(new Set());
   const [remoteStreamsByUserId, setRemoteStreamsByUserId] = useState<Record<number, MediaStream>>({});
-  const [selectedConversationId, setSelectedConversationId] = useState(
-    members[0] ? getPrivateConversationId(members[0].id) : null
-  );
+  const [micEnabled, setMicEnabled] = useState(true);
+  const [cameraEnabled, setCameraEnabled] = useState(true);
+  const [callChatOpen, setCallChatOpen] = useState(false);
+  const [callPresenceByKey, setCallPresenceByKey] = useState<Record<string, CallPresence>>({});
+  const [declinedCallKeys, setDeclinedCallKeys] = useState<string[]>([]);
+  const [, setCallTick] = useState(0);
   const [, startTransition] = useTransition();
+  const router = useRouter();
+  const pathname = usePathname();
+  const params = useParams();
+  const chatIdSlug = Array.isArray(params.chatId)
+    ? params.chatId[0]
+    : typeof params.chatId === "string"
+      ? params.chatId
+      : null;
+  const selectedConversationId = chatIdSlug
+    ? chatSlugToConversationId(chatIdSlug)
+    : null;
+  const selectConversation = useCallback(
+    (conversationId: string) => {
+      setDraft("");
+      router.push(`/chat/${conversationIdToChatSlug(conversationId)}`);
+    },
+    [router]
+  );
   const activeCallRef = useRef<ActiveCall | null>(null);
   const callConnectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
-  const callToastIdRef = useRef<string | number | null>(null);
+  const callPresenceConnectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
   const callRefsRef = useRef<Record<number, ChatPeerCall>>({});
+  const callPresenceByKeyRef = useRef<Record<string, CallPresence>>({});
+  const endActiveCallRef = useRef<() => void>(() => {});
+  const removePeerRef = useRef<(memberId: number) => void>(() => {});
+  const connectCallMemberRef = useRef<(memberId: number) => void>(() => {});
+  const joinCallRef = useRef<(conversation: ChatConversation) => void>(() => {});
+  const joiningRoomRef = useRef<string | null>(null);
+  const pendingCallKindRef = useRef<ChatCallKind>("audio");
   const connectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
   const groupsConnectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
+  const incomingRingRef = useRef<ReturnType<typeof playIncomingCallLoop> | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const presenceConnectionRef = useRef<ReturnType<typeof connectChatSocket> | null>(null);
   const seenMessageIdsRef = useRef(new Set<string>());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const pendingIceCandidatesRef = useRef<Record<string, RTCIceCandidateInit[]>>({});
-  const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const remoteAudioRefs = useRef<Record<number, HTMLAudioElement | null>>({});
   const remoteVideoRefs = useRef<Record<number, HTMLVideoElement | null>>({});
   const conversations = useMemo<ChatConversation[]>(() => {
     const privateConversations = members.map((member) => ({
@@ -209,13 +303,9 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   }, [groups, members, roomScope, user.id]);
   const selectedConversation =
     conversations.find((conversation) => conversation.id === selectedConversationId) ??
-    conversations[0] ??
     null;
   const roomId = selectedConversation?.roomId ?? null;
-  const messages = useMemo(
-    () => roomId ? messagesByRoom[roomId] ?? [] : [],
-    [messagesByRoom, roomId]
-  );
+  const messages = roomId ? messagesByRoom[roomId] ?? [] : [];
   const canSend = Boolean(roomId && draft.trim().length > 0);
   const selectedMemberOnline = Boolean(
     selectedConversation?.kind === "private" &&
@@ -234,15 +324,95 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
       : activeCall?.status === "ringing"
         ? "A atender"
         : "Em chamada";
-  const remoteStreams = useMemo(
-    () => Object.entries(remoteStreamsByUserId).map(([memberId, stream]) => ({
-      memberId: Number(memberId),
-      stream,
-    })),
-    [remoteStreamsByUserId]
-  );
+  const callParticipants = useMemo(() => {
+    if (!activeCall) {
+      return [];
+    }
 
-  function appendMessage(message: ChatMessage) {
+    const memberLookup = new Map(members.map((member) => [member.id, member]));
+
+    return [
+      { id: user.id, name: user.name, self: true, stream: localStream },
+      ...activeCall.memberIds.map((memberId) => ({
+        id: memberId,
+        name: memberLookup.get(memberId)?.name ?? `Utilizador ${memberId}`,
+        self: false,
+        stream: remoteStreamsByUserId[memberId] ?? null,
+      })),
+    ];
+  }, [activeCall, localStream, members, remoteStreamsByUserId, user.id, user.name]);
+  const callMessages = useMemo(
+    () => (activeCall ? messagesByRoom[activeCall.conversationRoomId] ?? [] : []),
+    [activeCall, messagesByRoom]
+  );
+  const selectedConversationHasCall = Boolean(
+    selectedConversation && callPresenceByKey[selectedConversation.roomId]?.users.length
+  );
+  // A call is "incoming" when one of our conversations has people in its call
+  // room, we're not in it, and we haven't declined it.
+  const incomingCall = ((): {
+    conversation: ChatConversation;
+    kind: ChatCallKind;
+    from: ChatSocketUser;
+    others: ChatSocketUser[];
+  } | null => {
+    if (activeCall) {
+      return null;
+    }
+
+    for (const conversation of conversations) {
+      if (declinedCallKeys.includes(conversation.roomId)) {
+        continue;
+      }
+
+      const presence = callPresenceByKey[conversation.roomId];
+      const others = presence?.users.filter((presenceUser) => presenceUser.id !== user.id) ?? [];
+
+      if (presence && others.length) {
+        return { conversation, kind: presence.kind, from: others[0], others };
+      }
+    }
+
+    return null;
+  })();
+  const incomingCallKey = incomingCall?.conversation.roomId ?? null;
+  // Recomputed on every callTick (1s interval) while connected; "" otherwise.
+  const callElapsedLabel =
+    activeCall?.status === "connected" ? formatCallDuration(activeCall.startedAt) : "";
+
+  const toggleMic = useCallback(() => {
+    const tracks = localStreamRef.current?.getAudioTracks() ?? [];
+
+    if (!tracks.length) {
+      return;
+    }
+
+    const nextEnabled = !tracks.some((track) => track.enabled);
+
+    for (const track of tracks) {
+      track.enabled = nextEnabled;
+    }
+
+    setMicEnabled(nextEnabled);
+  }, []);
+
+  const toggleCamera = useCallback(() => {
+    const tracks = localStreamRef.current?.getVideoTracks() ?? [];
+
+    if (!tracks.length) {
+      return;
+    }
+
+    const nextEnabled = !tracks.some((track) => track.enabled);
+
+    for (const track of tracks) {
+      track.enabled = nextEnabled;
+    }
+
+    setCameraEnabled(nextEnabled);
+  }, []);
+
+  const appendMessage = useCallback((message: ChatMessage) => {
     if (seenMessageIdsRef.current.has(message.id)) {
       return;
     }
@@ -255,26 +425,127 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
         message,
       ],
     }));
-  }
+  }, []);
+
+  const showPanelError = useCallback((title: string, message: string) => {
+    setPanelErrorTitle(title);
+    setPanelError(message);
+  }, []);
+
+  const postMessage = useCallback((message: ChatMessage) => {
+    appendMessage(message);
+    void fetch("/api/chat/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(message),
+    });
+  }, [appendMessage]);
+
+  const postCallSummary = useCallback((call: ActiveCall) => {
+    const message = createChatMessage({
+      body: `Chamada com ${call.conversationTitle}\nDuração ${formatCallDuration(call.startedAt)}`,
+      roomId: call.conversationRoomId,
+      user,
+    });
+
+    postMessage(message);
+  }, [postMessage, user]);
+
+  const sendCallMessage = useCallback((body: string) => {
+    const currentCall = activeCallRef.current;
+
+    if (!currentCall) {
+      return;
+    }
+
+    const message = createChatMessage({
+      body,
+      roomId: currentCall.conversationRoomId,
+      user,
+    });
+
+    postMessage(message);
+  }, [postMessage, user]);
+
+  const removeGroupLocally = useCallback((groupId: string) => {
+    setGroups((currentGroups) =>
+      currentGroups.filter((currentGroup) => currentGroup.id !== groupId)
+    );
+    setMessagesByRoom((currentMessagesByRoom) => {
+      const nextMessagesByRoom = { ...currentMessagesByRoom };
+
+      delete nextMessagesByRoom[getGroupRoomId(roomScope, groupId)];
+
+      return nextMessagesByRoom;
+    });
+
+    if (selectedConversationId === getGroupConversationId(groupId) && members[0]) {
+      selectConversation(getPrivateConversationId(members[0].id));
+    }
+  }, [members, roomScope, selectConversation, selectedConversationId]);
 
   function getCandidateKey(callId: string, memberId: number) {
     return `${callId}:${memberId}`;
   }
 
-  function createSignalBase(signal: OutgoingCallSignal): ChatCallSignal {
-    return {
-      ...signal,
-      id: createCallId(),
-      roomId: getCallRoomId(roomScope, signal.toUserId),
-      createdAt: new Date().toISOString(),
-    } as ChatCallSignal;
-  }
+  const createSignalBase = useCallback(
+    (signal: OutgoingCallSignal): ChatCallSignal =>
+      ({
+        ...signal,
+        id: createCallId(),
+        roomId: getCallRoomId(roomScope, signal.toUserId),
+        createdAt: new Date().toISOString(),
+      }) as ChatCallSignal,
+    [roomScope]
+  );
 
-  function sendCallSignal(signal: ChatCallSignal) {
+  const sendCallSignal = useCallback((signal: ChatCallSignal) => {
     callConnectionRef.current?.sendSignal(signal);
-  }
+  }, []);
 
-  async function flushIceCandidates(callId: string) {
+  const sendCallPresence = useCallback(
+    (conversationKey: string, kind: ChatCallKind, present: boolean) => {
+      callPresenceConnectionRef.current?.sendCallPresence({
+        type: "chat:call-presence",
+        roomScope,
+        conversationKey,
+        user: { id: user.id, name: user.name, email: user.email },
+        present,
+        kind,
+      });
+    },
+    [roomScope, user.email, user.id, user.name]
+  );
+
+  const declineIncomingCall = useCallback(
+    (call: { conversation: ChatConversation; others: ChatSocketUser[] }) => {
+      setDeclinedCallKeys((current) =>
+        current.includes(call.conversation.roomId)
+          ? current
+          : [...current, call.conversation.roomId]
+      );
+
+      // Tell whoever is in the room; if it leaves them alone, their call ends.
+      for (const other of call.others) {
+        sendCallSignal(
+          createSignalBase({
+            type: "call:end",
+            callId: call.conversation.roomId,
+            conversationRoomId: call.conversation.roomId,
+            conversationTitle: call.conversation.title,
+            fromUserId: user.id,
+            reason: "declined",
+            toUserId: other.id,
+          })
+        );
+      }
+    },
+    [createSignalBase, sendCallSignal, user.id]
+  );
+
+  const flushIceCandidates = useCallback(async (callId: string) => {
     const peerEntries = Object.entries(callRefsRef.current);
 
     for (const [memberIdValue, peerCall] of peerEntries) {
@@ -296,9 +567,9 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
         }
       }
     }
-  }
+  }, []);
 
-  async function addIceCandidate(signal: Extract<ChatCallSignal, { type: "call:candidate" }>) {
+  const addIceCandidate = useCallback(async (signal: Extract<ChatCallSignal, { type: "call:candidate" }>) => {
     const peerCall = callRefsRef.current[signal.fromUserId];
     const candidateKey = getCandidateKey(signal.callId, signal.fromUserId);
 
@@ -319,294 +590,421 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     } catch {
       return;
     }
-  }
+  }, []);
 
-  function clearActiveCall() {
+  const clearActiveCall = useCallback(() => {
     for (const peerCall of Object.values(callRefsRef.current)) {
       peerCall.close();
     }
 
+    for (const track of localStreamRef.current?.getTracks() ?? []) {
+      track.stop();
+    }
+
     callRefsRef.current = {};
     activeCallRef.current = null;
+    localStreamRef.current = null;
     setActiveCall(null);
     setLocalStream(null);
     setRemoteStreamsByUserId({});
-  }
+    setMicEnabled(true);
+    setCameraEnabled(true);
+    setCallChatOpen(false);
 
-  function endActiveCall(notify = true) {
+    if (typeof window !== "undefined" && window.location.pathname.endsWith("/call")) {
+      router.replace(window.location.pathname.slice(0, -"/call".length));
+    }
+  }, [router]);
+
+  const removePeer = useCallback((memberId: number) => {
+    const peerCall = callRefsRef.current[memberId];
+
+    if (peerCall) {
+      delete callRefsRef.current[memberId];
+      peerCall.close();
+    }
+
     const currentCall = activeCallRef.current;
 
-    if (notify && currentCall) {
-      for (const memberId of currentCall.memberIds) {
-        sendCallSignal(
-          createSignalBase({
-            type: "call:end",
-            callId: currentCall.callId,
-            fromUserId: user.id,
-            toUserId: memberId,
-          })
-        );
+    if (currentCall) {
+      delete pendingIceCandidatesRef.current[getCandidateKey(currentCall.callId, memberId)];
+    }
+
+    delete remoteVideoRefs.current[memberId];
+    setRemoteStreamsByUserId((currentStreams) => {
+      if (!(memberId in currentStreams)) {
+        return currentStreams;
       }
+
+      const nextStreams = { ...currentStreams };
+
+      delete nextStreams[memberId];
+
+      return nextStreams;
+    });
+
+    delete remoteAudioRefs.current[memberId];
+
+    if (!currentCall) {
+      return;
+    }
+
+    const nextMemberIds = currentCall.memberIds.filter((id) => id !== memberId);
+
+    // Once we'd be the only one left, the call is over — leave it too.
+    if (nextMemberIds.length === 0 && currentCall.status === "connected") {
+      endActiveCallRef.current();
+      return;
+    }
+
+    activeCallRef.current = { ...currentCall, memberIds: nextMemberIds };
+    setActiveCall(activeCallRef.current);
+  }, []);
+
+  useEffect(() => {
+    removePeerRef.current = removePeer;
+  }, [removePeer]);
+
+  const endActiveCall = useCallback(() => {
+    const currentCall = activeCallRef.current;
+
+    if (currentCall) {
+      // Announce we left the call room; the call lives on for anyone still in it.
+      sendCallPresence(currentCall.conversationRoomId, currentCall.kind, false);
+
+      if (currentCall.status === "connected") {
+        postCallSummary(currentCall);
+      }
+
+      playCallEndSound();
     }
 
     clearActiveCall();
-  }
+  }, [clearActiveCall, postCallSummary, sendCallPresence]);
 
-  async function startCall(kind: ChatCallKind) {
-    if (!selectedConversation || !selectedConversation.memberIds.length) {
+  useEffect(() => {
+    endActiveCallRef.current = endActiveCall;
+  }, [endActiveCall]);
+
+  useEffect(() => {
+    const handlePageHide = () => {
+      if (activeCallRef.current) {
+        endActiveCallRef.current();
+      }
+    };
+
+    window.addEventListener("pagehide", handlePageHide);
+
+    return () => window.removeEventListener("pagehide", handlePageHide);
+  }, []);
+
+  const answerPeerOffer = useCallback(async (
+    signal: Extract<ChatCallSignal, { type: "call:offer" }>,
+    localMedia: {
+      error: unknown;
+      stream: MediaStream | null;
+    }
+  ) => {
+    if (callRefsRef.current[signal.fromUserId]) {
       return;
     }
 
-    endActiveCall(false);
-
-    const callId = createCallId();
-    const memberIds = selectedConversation.memberIds;
-    const nextCall: ActiveCall = {
-      callId,
-      conversationTitle: selectedConversation.title,
-      kind,
-      memberIds,
-      status: "calling",
-    };
-
-    activeCallRef.current = nextCall;
-    setActiveCall(nextCall);
-
-    try {
-      for (const memberId of memberIds) {
-        const peerCall = await createChatPeerCall({
-          kind,
-          onIceCandidate: (candidate) => {
-            sendCallSignal(
-              createSignalBase({
-                type: "call:candidate",
-                callId,
-                fromUserId: user.id,
-                toUserId: memberId,
-                candidate: candidate.toJSON(),
-              })
-            );
-          },
-          onRemoteStream: (stream) => {
-            setRemoteStreamsByUserId((currentStreams) => ({
-              ...currentStreams,
-              [memberId]: stream,
-            }));
-          },
-        });
-        const description = await peerCall.createOffer();
-
-        callRefsRef.current[memberId] = peerCall;
-        setLocalStream((currentStream) => currentStream ?? peerCall.localStream);
-        if (peerCall.localMediaError) {
-          toast.warning(getCallErrorMessage(peerCall.localMediaError));
-        }
+    const peerCall = await createChatPeerCall({
+      kind: signal.kind,
+      localMediaError: localMedia.error,
+      localStream: localMedia.stream,
+      onConnectionLost: () => removePeerRef.current(signal.fromUserId),
+      onIceCandidate: (candidate) => {
         sendCallSignal(
           createSignalBase({
-            type: "call:offer",
-            callId,
+            type: "call:candidate",
+            callId: signal.callId,
             fromUserId: user.id,
-            toUserId: memberId,
-            fromName: user.name,
-            description,
-            kind,
+            toUserId: signal.fromUserId,
+            candidate: candidate.toJSON(),
           })
         );
-      }
-      toast.success(
-        selectedConversation.kind === "group"
-          ? "Chamada de grupo iniciada."
-          : kind === "video" ? "Videochamada iniciada." : "Chamada iniciada."
-      );
-    } catch (error) {
-      clearActiveCall();
-      toast.error(getCallErrorMessage(error));
-    }
-  }
+      },
+      onRemoteStream: (stream) => {
+        setRemoteStreamsByUserId((currentStreams) => ({
+          ...currentStreams,
+          [signal.fromUserId]: stream,
+        }));
+      },
+      stopLocalStreamOnClose: false,
+    });
+    const description = await peerCall.answer(signal.description);
 
-  async function answerIncomingCall(
-    signal: Extract<ChatCallSignal, { type: "call:offer" }>
-  ) {
-    endActiveCall(false);
-    setSelectedConversationId(getPrivateConversationId(signal.fromUserId));
-
-    const nextCall: ActiveCall = {
-      callId: signal.callId,
-      conversationTitle: signal.fromName,
-      kind: signal.kind,
-      memberIds: [signal.fromUserId],
-      status: "ringing",
-    };
-
-    activeCallRef.current = nextCall;
-    setActiveCall(nextCall);
-
-    try {
-      const peerCall = await createChatPeerCall({
-        kind: signal.kind,
-          onIceCandidate: (candidate) => {
-            sendCallSignal(
-              createSignalBase({
-              type: "call:candidate",
-              callId: signal.callId,
-              fromUserId: user.id,
-              toUserId: signal.fromUserId,
-                candidate: candidate.toJSON(),
-              })
-            );
-          },
-        onRemoteStream: (stream) => {
-          setRemoteStreamsByUserId((currentStreams) => ({
-            ...currentStreams,
-            [signal.fromUserId]: stream,
-          }));
-        },
-      });
-      const description = await peerCall.answer(signal.description);
-
-      callRefsRef.current[signal.fromUserId] = peerCall;
-      setLocalStream(peerCall.localStream);
-      if (peerCall.localMediaError) {
-        toast.warning(getCallErrorMessage(peerCall.localMediaError));
-      }
-      sendCallSignal(
-        createSignalBase({
-          type: "call:answer",
-          callId: signal.callId,
-          fromUserId: user.id,
-          toUserId: signal.fromUserId,
-          description,
-        })
-      );
-      await flushIceCandidates(signal.callId);
-      activeCallRef.current = {
-        ...nextCall,
-        status: "connected",
-      };
-      setActiveCall(activeCallRef.current);
-      toast.success("Chamada atendida.");
-    } catch (error) {
-      clearActiveCall();
-      toast.error(getCallErrorMessage(error));
-    }
-  }
-
-  function declineIncomingCall(signal: Extract<ChatCallSignal, { type: "call:offer" }>) {
+    callRefsRef.current[signal.fromUserId] = peerCall;
     sendCallSignal(
       createSignalBase({
-        type: "call:end",
+        type: "call:answer",
         callId: signal.callId,
         fromUserId: user.id,
         toUserId: signal.fromUserId,
+        description,
       })
     );
-  }
+    await flushIceCandidates(signal.callId);
+  }, [createSignalBase, flushIceCandidates, sendCallSignal, user.id]);
 
-  function showIncomingCall(signal: Extract<ChatCallSignal, { type: "call:offer" }>) {
-    if (callToastIdRef.current) {
-      toast.dismiss(callToastIdRef.current);
-    }
-
-    callToastIdRef.current = toast.custom(
-      (toastId) => (
-        <div className="flex w-80 flex-col gap-3 border border-border bg-popover p-4 text-popover-foreground shadow-md">
-          <div className="flex items-start gap-3">
-            <span className="grid size-9 shrink-0 place-items-center bg-primary text-primary-foreground">
-              {signal.kind === "video" ? (
-                <Video className="size-4" />
-              ) : (
-                <Phone className="size-4" />
-              )}
-            </span>
-            <div className="min-w-0">
-              <p className="text-sm font-medium">
-                {signal.kind === "video" ? "Videochamada" : "Chamada"}
-              </p>
-              <p className="truncate text-sm text-muted-foreground">
-                {signal.fromName}
-              </p>
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                toast.dismiss(toastId);
-                callToastIdRef.current = null;
-                declineIncomingCall(signal);
-              }}
-            >
-              <PhoneOff />
-              Recusar
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => {
-                toast.dismiss(toastId);
-                callToastIdRef.current = null;
-                void answerIncomingCall(signal);
-              }}
-            >
-              <Phone />
-              Atender
-            </Button>
-          </div>
-        </div>
-      ),
-      {
-        duration: 30_000,
-        onDismiss: () => {
-          callToastIdRef.current = null;
-        },
+  const createMeshOffers = useCallback(async ({
+    callId,
+    conversationRoomId,
+    conversationTitle,
+    kind,
+    localMedia,
+    participantIds,
+  }: {
+    callId: string;
+    conversationRoomId: string;
+    conversationTitle: string;
+    kind: ChatCallKind;
+    localMedia: {
+      error: unknown;
+      stream: MediaStream | null;
+    };
+    participantIds: number[];
+  }) => {
+    for (const memberId of participantIds) {
+      if (
+        memberId === user.id ||
+        memberId < user.id ||
+        callRefsRef.current[memberId]
+      ) {
+        continue;
       }
-    );
-  }
 
-  function handleCallSignal(signal: ChatCallSignal) {
-    if (signal.toUserId !== user.id || signal.fromUserId === user.id) {
+      const peerCall = await createChatPeerCall({
+        kind,
+        localMediaError: localMedia.error,
+        localStream: localMedia.stream,
+        onConnectionLost: () => removePeerRef.current(memberId),
+        onIceCandidate: (candidate) => {
+          sendCallSignal(
+            createSignalBase({
+              type: "call:candidate",
+              callId,
+              fromUserId: user.id,
+              toUserId: memberId,
+              candidate: candidate.toJSON(),
+            })
+          );
+        },
+        onRemoteStream: (stream) => {
+          setRemoteStreamsByUserId((currentStreams) => ({
+            ...currentStreams,
+            [memberId]: stream,
+          }));
+        },
+        stopLocalStreamOnClose: false,
+      });
+      const description = await peerCall.createOffer();
+
+      callRefsRef.current[memberId] = peerCall;
+      sendCallSignal(
+        createSignalBase({
+          type: "call:offer",
+          callId,
+          conversationRoomId,
+          conversationTitle,
+          fromUserId: user.id,
+          toUserId: memberId,
+          fromName: user.name,
+          participantIds,
+          description,
+          kind,
+        })
+      );
+    }
+  }, [createSignalBase, sendCallSignal, user.id, user.name]);
+
+  const connectCallMember = useCallback(async (memberId: number) => {
+    const currentCall = activeCallRef.current;
+
+    if (!currentCall || memberId === user.id) {
       return;
     }
 
-    if (signal.type === "call:offer") {
-      showIncomingCall(signal);
-      return;
+    if (!currentCall.memberIds.includes(memberId)) {
+      activeCallRef.current = {
+        ...currentCall,
+        memberIds: [...currentCall.memberIds, memberId],
+        status: "connected",
+      };
+      setActiveCall(activeCallRef.current);
     }
 
-    if (signal.type === "call:answer") {
-      const peerCall = callRefsRef.current[signal.fromUserId];
+    // createMeshOffers only offers higher-id peers; a lower-id peer offers us.
+    await createMeshOffers({
+      callId: currentCall.callId,
+      conversationRoomId: currentCall.conversationRoomId,
+      conversationTitle: currentCall.conversationTitle,
+      kind: currentCall.kind,
+      localMedia: { error: null, stream: localStreamRef.current },
+      participantIds: [memberId],
+    });
+  }, [createMeshOffers, user.id]);
 
-      if (activeCallRef.current?.callId !== signal.callId || !peerCall) {
+  useEffect(() => {
+    connectCallMemberRef.current = (memberId) => {
+      void connectCallMember(memberId);
+    };
+  }, [connectCallMember]);
+
+  const joinCall = useCallback(
+    async (conversation: ChatConversation, requestedKind?: ChatCallKind) => {
+      const conversationKey = conversation.roomId;
+
+      if (
+        activeCallRef.current?.conversationRoomId === conversationKey ||
+        joiningRoomRef.current === conversationKey
+      ) {
         return;
       }
 
-      void peerCall.setRemoteAnswer(signal.description).then(async () => {
-        await flushIceCandidates(signal.callId);
-        activeCallRef.current = {
-          ...activeCallRef.current!,
-          status: "connected",
-        };
-        setActiveCall(activeCallRef.current);
-        toast.success("Chamada ligada.");
-      });
-      return;
-    }
-
-    if (signal.type === "call:candidate") {
-      void addIceCandidate(signal);
-      return;
-    }
-
-    if (signal.type === "call:end") {
-      if (activeCallRef.current?.callId === signal.callId) {
-        clearActiveCall();
+      // Leave any other call before joining this one.
+      if (activeCallRef.current) {
+        endActiveCall();
       }
 
-      toast.info("Chamada terminada.");
-    }
-  }
+      joiningRoomRef.current = conversationKey;
+
+      const existing = callPresenceByKeyRef.current[conversationKey];
+      const presentOthers = (existing?.users ?? []).filter(
+        (presenceUser) => presenceUser.id !== user.id
+      );
+      const kind = existing?.users.length
+        ? existing.kind
+        : requestedKind ?? pendingCallKindRef.current;
+
+      const nextCall: ActiveCall = {
+        callId: conversationKey,
+        conversationRoomId: conversationKey,
+        conversationTitle: conversation.title,
+        kind,
+        memberIds: presentOthers.map((presenceUser) => presenceUser.id),
+        startedAt: Date.now(),
+        status: presentOthers.length ? "connected" : "calling",
+      };
+
+      activeCallRef.current = nextCall;
+      setActiveCall(nextCall);
+
+      try {
+        const localMedia = await createChatLocalStream(kind);
+
+        localStreamRef.current = localMedia.stream;
+        setLocalStream(localMedia.stream);
+
+        if (localMedia.error) {
+          showPanelError("Erro na chamada", getCallErrorMessage(localMedia.error));
+        }
+
+        // Announce we're in the room; members already present will also offer us.
+        sendCallPresence(conversationKey, kind, true);
+
+        await createMeshOffers({
+          callId: conversationKey,
+          conversationRoomId: conversationKey,
+          conversationTitle: conversation.title,
+          kind,
+          localMedia,
+          participantIds: presentOthers.map((presenceUser) => presenceUser.id),
+        });
+      } catch (error) {
+        clearActiveCall();
+        showPanelError("Erro na chamada", getCallErrorMessage(error));
+      } finally {
+        joiningRoomRef.current = null;
+      }
+    },
+    [clearActiveCall, createMeshOffers, endActiveCall, sendCallPresence, showPanelError, user.id]
+  );
+
+  useEffect(() => {
+    joinCallRef.current = (conversation) => {
+      void joinCall(conversation);
+    };
+  }, [joinCall]);
+
+  const handleCallSignal = useCallback(
+    (signal: ChatCallSignal) => {
+      if (signal.toUserId !== user.id || signal.fromUserId === user.id) {
+        return;
+      }
+
+      const currentCall = activeCallRef.current;
+
+      // Signals only matter for the call we're currently in — there is no
+      // ringing/incoming model anymore; you join a room and mesh with whoever
+      // is present.
+      if (signal.type === "call:offer") {
+        if (currentCall?.callId !== signal.callId) {
+          return;
+        }
+
+        void (async () => {
+          const localMedia = localStreamRef.current
+            ? { error: null, stream: localStreamRef.current }
+            : await createChatLocalStream(signal.kind);
+
+          if (!localStreamRef.current) {
+            localStreamRef.current = localMedia.stream;
+            setLocalStream(localMedia.stream);
+          }
+
+          await answerPeerOffer(signal, localMedia);
+
+          if (activeCallRef.current) {
+            activeCallRef.current = {
+              ...activeCallRef.current,
+              memberIds: Array.from(
+                new Set([...activeCallRef.current.memberIds, signal.fromUserId])
+              ),
+              status: "connected",
+            };
+            setActiveCall(activeCallRef.current);
+          }
+        })();
+        return;
+      }
+
+      if (signal.type === "call:answer") {
+        const peerCall = callRefsRef.current[signal.fromUserId];
+
+        if (currentCall?.callId !== signal.callId || !peerCall) {
+          return;
+        }
+
+        void peerCall.setRemoteAnswer(signal.description).then(async () => {
+          await flushIceCandidates(signal.callId);
+
+          if (activeCallRef.current) {
+            activeCallRef.current = { ...activeCallRef.current, status: "connected" };
+            setActiveCall(activeCallRef.current);
+          }
+        });
+        return;
+      }
+
+      if (signal.type === "call:candidate") {
+        void addIceCandidate(signal);
+        return;
+      }
+
+      if (signal.type === "call:end" && currentCall?.callId === signal.callId) {
+        if (currentCall.memberIds.includes(signal.fromUserId)) {
+          // A connected peer left.
+          removePeerRef.current(signal.fromUserId);
+        } else if (currentCall.memberIds.length === 0) {
+          // Our invite was declined and we're the only one here — end the call.
+          endActiveCallRef.current();
+        }
+      }
+    },
+    [addIceCandidate, answerPeerOffer, flushIceCandidates, user.id]
+  );
 
   useEffect(() => {
     if (!roomId) {
@@ -626,7 +1024,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
       connection.close();
       connectionRef.current = null;
     };
-  }, [roomId, socketUrl, user]);
+  }, [appendMessage, roomId, socketUrl, user]);
 
   useEffect(() => {
     const connection = connectChatSocket({
@@ -643,7 +1041,78 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
       connection.close();
       callConnectionRef.current = null;
     };
+  }, [handleCallSignal, roomScope, socketUrl, user]);
+
+  useEffect(() => {
+    const connection = connectChatSocket({
+      roomId: getCallsPresenceRoomId(roomScope),
+      url: socketUrl,
+      user,
+      onMessage: () => {},
+      onCallPresence: (presence: ChatCallPresence) => {
+        // Drive the mesh for the call we're currently in: connect to anyone who
+        // joins our room, drop anyone who leaves.
+        if (presence.user.id !== user.id) {
+          const currentCall = activeCallRef.current;
+
+          if (currentCall?.conversationRoomId === presence.conversationKey) {
+            if (presence.present) {
+              connectCallMemberRef.current(presence.user.id);
+            } else {
+              removePeerRef.current(presence.user.id);
+            }
+          }
+        }
+
+        setCallPresenceByKey((current) => {
+          const entry = current[presence.conversationKey];
+          const baseUsers = entry?.users ?? [];
+          const users = presence.present
+            ? [...baseUsers.filter((u) => u.id !== presence.user.id), presence.user]
+            : baseUsers.filter((u) => u.id !== presence.user.id);
+          const next = { ...current };
+
+          if (users.length) {
+            next[presence.conversationKey] = {
+              kind: presence.present ? presence.kind : entry?.kind ?? presence.kind,
+              users,
+            };
+          } else {
+            delete next[presence.conversationKey];
+          }
+
+          return next;
+        });
+
+        // When a call empties, forget any decline so a future call rings again.
+        if (!presence.present) {
+          const entry = callPresenceByKeyRef.current[presence.conversationKey];
+          const remaining = (entry?.users ?? []).filter(
+            (presenceUser) => presenceUser.id !== presence.user.id
+          );
+
+          if (!remaining.length) {
+            setDeclinedCallKeys((current) =>
+              current.includes(presence.conversationKey)
+                ? current.filter((key) => key !== presence.conversationKey)
+                : current
+            );
+          }
+        }
+      },
+    });
+
+    callPresenceConnectionRef.current = connection;
+
+    return () => {
+      connection.close();
+      callPresenceConnectionRef.current = null;
+    };
   }, [roomScope, socketUrl, user]);
+
+  useEffect(() => {
+    callPresenceByKeyRef.current = callPresenceByKey;
+  }, [callPresenceByKey]);
 
   useEffect(() => {
     const connection = connectChatSocket({
@@ -660,6 +1129,9 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
           );
         });
       },
+      onGroupDelete: (groupId) => {
+        removeGroupLocally(groupId);
+      },
     });
 
     groupsConnectionRef.current = connection;
@@ -668,7 +1140,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
       connection.close();
       groupsConnectionRef.current = null;
     };
-  }, [roomScope, socketUrl, user]);
+  }, [removeGroupLocally, roomScope, socketUrl, user]);
 
   useEffect(() => {
     const connection = connectChatSocket({
@@ -702,14 +1174,34 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: "end" });
-  }, [messages]);
+  }, [messages.length, roomId]);
 
   useEffect(() => {
     activeCallRef.current = activeCall;
   }, [activeCall]);
 
+  // Ring while there's an incoming call to answer.
   useEffect(() => {
-    if (localVideoRef.current) {
+    if (!incomingCallKey) {
+      incomingRingRef.current?.stop();
+      incomingRingRef.current = null;
+      return;
+    }
+
+    if (!incomingRingRef.current) {
+      incomingRingRef.current = playIncomingCallLoop();
+    }
+
+    return () => {
+      incomingRingRef.current?.stop();
+      incomingRingRef.current = null;
+    };
+  }, [incomingCallKey]);
+
+  useEffect(() => {
+    localStreamRef.current = localStream;
+
+    if (localVideoRef.current && localVideoRef.current.srcObject !== localStream) {
       localVideoRef.current.srcObject = localStream;
     }
   }, [localStream]);
@@ -718,18 +1210,50 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     for (const [memberId, stream] of Object.entries(remoteStreamsByUserId)) {
       const video = remoteVideoRefs.current[Number(memberId)];
 
-      if (video) {
+      if (video && video.srcObject !== stream) {
         video.srcObject = stream;
+      }
+
+      const audio = remoteAudioRefs.current[Number(memberId)];
+
+      if (audio && audio.srcObject !== stream) {
+        audio.srcObject = stream;
       }
     }
   }, [remoteStreamsByUserId]);
 
   useEffect(() => {
-    if (remoteAudioRef.current) {
-      remoteAudioRef.current.srcObject =
-        activeCall?.kind === "audio" ? remoteStreams[0]?.stream ?? null : null;
+    // The /call route IS the call: entering it joins (or rejoins) the room.
+    // joinCall is idempotent, so re-runs while already in the call are no-ops.
+    if (!pathname?.endsWith("/call") || !selectedConversation) {
+      return;
     }
-  }, [activeCall?.kind, remoteStreams]);
+
+    if (activeCallRef.current?.conversationRoomId === selectedConversation.roomId) {
+      return;
+    }
+
+    joinCallRef.current(selectedConversation);
+  }, [pathname, selectedConversation]);
+
+  useEffect(() => {
+    if (!activeCall || activeCall.status !== "connected") {
+      return;
+    }
+
+    const interval = setInterval(() => setCallTick((tick) => tick + 1), 1000);
+
+    return () => clearInterval(interval);
+  }, [activeCall]);
+
+  function startCallWithKind(kind: ChatCallKind) {
+    if (!selectedConversation) {
+      return;
+    }
+
+    pendingCallKindRef.current = kind;
+    router.push(`/chat/${conversationIdToChatSlug(selectedConversation.id)}/call`);
+  }
 
   function sendMessage() {
     const body = draft.trim();
@@ -763,7 +1287,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     const name = groupDraftName.trim();
 
     if (!name || groupDraftMemberIds.length === 0) {
-      toast.error("Escolha um nome e pelo menos um membro.");
+      showPanelError("Erro no grupo", "Escolha um nome e pelo menos um membro.");
       return;
     }
 
@@ -784,8 +1308,14 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
     setGroupDraftName("");
     setGroupDraftMemberIds([]);
     setShowGroupForm(false);
-    setSelectedConversationId(getGroupConversationId(group.id));
-    toast.success("Grupo criado.");
+    selectConversation(getGroupConversationId(group.id));
+  }
+
+  function deleteOrLeaveGroup(group: ChatGroup) {
+    removeGroupLocally(group.id);
+    startTransition(() => {
+      groupsConnectionRef.current?.sendGroupDelete(group.id, group.roomScope);
+    });
   }
 
   const messageCountLabel = useMemo(
@@ -794,14 +1324,38 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
   );
 
   return (
-    <section
-      className={cn(
-        "grid h-screen min-h-0 w-full overflow-hidden bg-card",
-        membersCollapsed
-          ? "md:grid-cols-[minmax(0,1fr)_4.5rem]"
-          : "md:grid-cols-[minmax(0,1fr)_20rem]"
-      )}
-    >
+    <>
+      <AlertDialog
+        open={Boolean(panelError)}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) {
+            setPanelError(null);
+          }
+        }}
+      >
+        <AlertDialogContent size="sm">
+          <AlertDialogHeader>
+            <AlertDialogMedia className="bg-destructive/10 text-destructive dark:bg-destructive/20 dark:text-destructive">
+              <PhoneOff className="size-4" />
+            </AlertDialogMedia>
+            <AlertDialogTitle>{panelErrorTitle}</AlertDialogTitle>
+            <AlertDialogDescription>{panelError}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setPanelError(null)}>
+              OK
+            </AlertDialogCancel>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <section
+        className={cn(
+          "grid h-screen min-h-0 w-full overflow-hidden bg-card",
+          membersCollapsed
+            ? "md:grid-cols-[minmax(0,1fr)_4.5rem]"
+            : "md:grid-cols-[minmax(0,1fr)_20rem]"
+        )}
+      >
       <div className="flex min-h-0 flex-col bg-card">
         <header className="flex h-[4.0625rem] items-center justify-between gap-3 border-b border-border px-4 py-3">
           {selectedConversation ? (
@@ -844,28 +1398,21 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
                 type="button"
                 variant="ghost"
                 size="icon-sm"
-                aria-label={activeCall ? "Terminar chamada" : "Iniciar chamada"}
-                disabled={!selectedConversation && !activeCall}
-                onClick={() => {
-                  if (activeCall) {
-                    endActiveCall();
-                    return;
-                  }
-
-                  void startCall("audio");
-                }}
+                aria-label={selectedConversationHasCall ? "Entrar na chamada" : "Iniciar chamada"}
+                disabled={!selectedConversation}
+                className={cn(selectedConversationHasCall && "text-yellow-500 hover:text-yellow-500")}
+                onClick={() => startCallWithKind("audio")}
               >
-                {activeCall ? <PhoneOff /> : <Phone />}
+                <Phone />
               </Button>
               <Button
                 type="button"
                 variant="ghost"
                 size="icon-sm"
-                aria-label="Iniciar videochamada"
-                disabled={!selectedConversation || Boolean(activeCall)}
-                onClick={() => {
-                  void startCall("video");
-                }}
+                aria-label={selectedConversationHasCall ? "Entrar na videochamada" : "Iniciar videochamada"}
+                disabled={!selectedConversation}
+                className={cn(selectedConversationHasCall && "text-yellow-500 hover:text-yellow-500")}
+                onClick={() => startCallWithKind("video")}
               >
                 <Video />
               </Button>
@@ -874,53 +1421,6 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
         </header>
 
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-background px-4 py-4">
-          {activeCall ? (
-            <div className="border border-border bg-card p-3">
-              <audio ref={remoteAudioRef} autoPlay />
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">
-                    {callStatusLabel}
-                    {activeCall ? ` com ${activeCall.conversationTitle}` : ""}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {activeCall.kind === "video" ? "Videochamada" : "Chamada"}
-                  </p>
-                </div>
-                <Button
-                  type="button"
-                  variant="destructive"
-                  size="sm"
-                  onClick={() => endActiveCall()}
-                >
-                  <PhoneOff />
-                  Terminar
-                </Button>
-              </div>
-              {activeCall.kind === "video" ? (
-                <div className="grid gap-2 sm:grid-cols-2">
-                  {remoteStreams.map(({ memberId }) => (
-                    <video
-                      key={memberId}
-                      ref={(node) => {
-                        remoteVideoRefs.current[memberId] = node;
-                      }}
-                      autoPlay
-                      playsInline
-                      className="aspect-video w-full bg-muted object-cover"
-                    />
-                  ))}
-                  <video
-                    ref={localVideoRef}
-                    autoPlay
-                    muted
-                    playsInline
-                    className="aspect-video w-full bg-muted object-cover"
-                  />
-                </div>
-              ) : null}
-            </div>
-          ) : null}
           {!selectedConversation ? (
             <div className="grid h-full place-items-center text-sm text-muted-foreground">
               Escolha uma conversa.
@@ -1067,51 +1567,89 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
                 onlineMemberIds.has(conversation.member.id);
 
               return (
-                <button
+                <div
                   key={conversation.id}
-                  type="button"
-                  title={conversation.title}
                   className={cn(
-                    "relative flex w-full items-center gap-3 px-2 py-2 text-left transition-colors hover:bg-muted/70",
-                    selected && "bg-muted",
-                    membersCollapsed && "justify-center px-0"
+                    "relative flex w-full items-center transition-colors hover:bg-muted/70",
+                    selected && "bg-muted"
                   )}
-                  onClick={() => {
-                    setDraft("");
-                    setSelectedConversationId(conversation.id);
-                  }}
                 >
-                  {conversation.kind === "group" ? (
-                    <span className="grid size-8 shrink-0 place-items-center border border-border bg-muted text-muted-foreground">
-                      <Users className="size-4" />
-                    </span>
-                  ) : (
-                    <Avatar size="sm">
-                      <AvatarFallback>{getInitials(conversation.title)}</AvatarFallback>
-                    </Avatar>
-                  )}
-                  {membersCollapsed ? null : (
-                    <>
-                      <span className="min-w-0 flex-1">
-                        <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
-                          <span
-                            className={cn(
-                              "size-2 shrink-0 rounded-full",
-                              online ? "bg-primary" : "bg-border"
-                            )}
-                            aria-hidden="true"
-                          />
-                          <span className="truncate">{conversation.title}</span>
-                        </span>
-                        <span className="block truncate text-xs text-muted-foreground">
-                          {conversation.subtitle}
-                        </span>
+                  <button
+                    type="button"
+                    title={conversation.title}
+                    className={cn(
+                      "flex min-w-0 flex-1 items-center gap-3 px-2 py-2 text-left",
+                      membersCollapsed && "justify-center px-0"
+                    )}
+                    onClick={() => selectConversation(conversation.id)}
+                  >
+                    {conversation.kind === "group" ? (
+                      <span className="grid size-8 shrink-0 place-items-center border border-border bg-muted text-muted-foreground">
+                        <Users className="size-4" />
                       </span>
-                      {unreadCount ? (
-                        <Badge variant="secondary">{unreadCount}</Badge>
-                      ) : null}
-                    </>
-                  )}
+                    ) : (
+                      <Avatar size="sm">
+                        <AvatarFallback>{getInitials(conversation.title)}</AvatarFallback>
+                      </Avatar>
+                    )}
+                    {membersCollapsed ? null : (
+                      <>
+                        <span className="min-w-0 flex-1">
+                          <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
+                            <span
+                              className={cn(
+                                "size-2 shrink-0 rounded-full",
+                                online ? "bg-primary" : "bg-border"
+                              )}
+                              aria-hidden="true"
+                            />
+                            <span className="truncate">{conversation.title}</span>
+                          </span>
+                          <span className="block truncate text-xs text-muted-foreground">
+                            {conversation.subtitle}
+                          </span>
+                        </span>
+                        {unreadCount ? (
+                          <Badge variant="secondary">{unreadCount}</Badge>
+                        ) : null}
+                      </>
+                    )}
+                  </button>
+                  {!membersCollapsed && conversation.kind === "group" ? (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger
+                        render={
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            aria-label="Ações do grupo"
+                            className="mr-1 shrink-0"
+                          />
+                        }
+                      >
+                        <MoreHorizontal />
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          variant={conversation.group.createdByUserId === user.id ? "destructive" : "default"}
+                          onClick={() => deleteOrLeaveGroup(conversation.group)}
+                        >
+                          {conversation.group.createdByUserId === user.id ? (
+                            <>
+                              <Trash2 />
+                              Eliminar grupo
+                            </>
+                          ) : (
+                            <>
+                              <LogOut />
+                              Sair do grupo
+                            </>
+                          )}
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  ) : null}
                   {membersCollapsed ? (
                     <span
                       className={cn(
@@ -1126,7 +1664,7 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
                       {unreadCount}
                     </span>
                   ) : null}
-                </button>
+                </div>
               );
             })
           ) : (
@@ -1141,7 +1679,68 @@ function ChatPanel({ members, roomScope, socketUrl, user }: ChatPanelProps) {
           )}
         </div>
       </aside>
-    </section>
+      </section>
+
+      {incomingCall ? (
+        <div className="fixed bottom-4 right-4 z-50 flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-3 border border-border bg-popover p-4 text-popover-foreground shadow-lg">
+          <div className="flex items-center gap-3">
+            <Avatar size="default">
+              <AvatarFallback>{getInitials(incomingCall.from.name)}</AvatarFallback>
+            </Avatar>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">{incomingCall.conversation.title}</p>
+              <p className="truncate text-xs text-muted-foreground">
+                {incomingCall.kind === "video" ? "Videochamada" : "Chamada"} · {incomingCall.from.name}
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => declineIncomingCall(incomingCall)}
+            >
+              <PhoneOff />
+              Recusar
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              onClick={() =>
+                router.push(`/chat/${conversationIdToChatSlug(incomingCall.conversation.id)}/call`)
+              }
+            >
+              <Phone />
+              Atender
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {activeCall ? (
+        <CallScreen
+          title={activeCall.conversationTitle}
+          statusLabel={callStatusLabel}
+          elapsedLabel={callElapsedLabel}
+          kind={activeCall.kind}
+          participants={callParticipants}
+          currentUserId={user.id}
+          localVideoRef={localVideoRef}
+          remoteVideoRefs={remoteVideoRefs}
+          remoteAudioRefs={remoteAudioRefs}
+          micEnabled={micEnabled}
+          cameraEnabled={cameraEnabled}
+          chatOpen={callChatOpen}
+          messages={callMessages}
+          onToggleMic={toggleMic}
+          onToggleCamera={toggleCamera}
+          onToggleChat={() => setCallChatOpen((open) => !open)}
+          onExit={() => endActiveCallRef.current()}
+          onSendMessage={sendCallMessage}
+        />
+      ) : null}
+    </>
   );
 }
 

@@ -19,6 +19,7 @@ import {
   type DropZoneReorderDetails,
 } from "@/components/draggable"
 import { Multiselect } from "@/components/multiselect"
+import { BoardRedirectInput } from "@/components/pages/boards/board-redirect-input"
 import { TaskDialog, type TaskDialogTask } from "@/components/pages/boards/task-dialog"
 import { Button } from "@/components/ui/button"
 import {
@@ -299,6 +300,7 @@ function AddTaskSheet({
         </SheetHeader>
         <form action={createTaskAction} className="space-y-4 p-4">
           <input type="hidden" name="boardId" value={boardId} />
+          <BoardRedirectInput />
           <input type="hidden" name="columnId" value={column.id} />
           <div className="space-y-2">
             <Label htmlFor={`task-title-${column.id}`}>Título</Label>

@@ -2,27 +2,35 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ## Getting Started
 
-First, run the development server:
+Create the app environment file and run the development server:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
+cp .env.example .env
 pnpm dev
-# or
-bun dev
 ```
 
-After that run the following:
+Start the Docker services:
+
 ```bash
 docker compose up -d
-or:
-docker compose up -d postgres
+```
+
+Or start individual services:
+
+```bash
+docker compose up -d postgres minio
 docker compose up -d app
-or for a full rebuild:
+```
+
+For a full rebuild:
+
+```bash
 docker compose up -d --build
-or for production:
+```
+
+For production with HTTPS:
+
+```bash
 docker compose --profile https up -d --build
 ```
 

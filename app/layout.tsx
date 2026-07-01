@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { ThemeProvider } from "@/components/theme-provider";
 import Config from "@/lib/config";
 import { Toaster } from "@/components/ui/sonner";
+import { ScreenPopupProvider } from "@/components/screen-popup";
 
 const notoSans = Noto_Sans({
   variable: "--font-sans",
@@ -46,8 +47,10 @@ export default function BaseLayout({
           enableSystem
           disableTransitionOnChange
         >
-          {children}
-          <Toaster richColors position="bottom-right" />
+          <ScreenPopupProvider>
+            {children}
+            <Toaster richColors position="bottom-right" />
+          </ScreenPopupProvider>
         </ThemeProvider>
       </body>
     </html>

@@ -38,6 +38,9 @@ export type ChatCallSignal =
       fromUserId: number;
       toUserId: number;
       fromName: string;
+      conversationRoomId?: string;
+      conversationTitle?: string;
+      participantIds?: number[];
       description: RTCSessionDescriptionInit;
       kind: ChatCallKind;
       createdAt: string;
@@ -69,6 +72,10 @@ export type ChatCallSignal =
       callId: string;
       fromUserId: number;
       toUserId: number;
+      conversationRoomId?: string;
+      conversationTitle?: string;
+      participantIds?: number[];
+      reason?: "ended" | "declined" | "missed";
       createdAt: string;
     };
 
@@ -94,7 +101,22 @@ export type ChatSocketEvent =
   | {
       type: "chat:group";
       group: ChatGroup;
+    }
+  | {
+      type: "chat:group:delete";
+      groupId: string;
+      roomScope: string;
+    }
+  | {
+      type: "chat:call-presence";
+      roomScope: string;
+      conversationKey: string;
+      user: ChatSocketUser;
+      present: boolean;
+      kind: ChatCallKind;
     };
+
+export type ChatCallPresence = Extract<ChatSocketEvent, { type: "chat:call-presence" }>;
 
 type ChatSocketOptions = {
   roomId: string;
@@ -103,7 +125,9 @@ type ChatSocketOptions = {
   announcePresence?: boolean;
   onMessage: (message: ChatMessage) => void;
   onGroup?: (group: ChatGroup) => void;
+  onGroupDelete?: (groupId: string, roomScope: string) => void;
   onPresenceChange?: (user: ChatSocketUser, online: boolean) => void;
+  onCallPresence?: (presence: ChatCallPresence) => void;
   onSignal?: (signal: ChatCallSignal) => void;
   onStatusChange?: (status: ChatSocketStatus) => void;
 };
@@ -112,7 +136,9 @@ type ChatSocketConnection = {
   close: () => void;
   send: (message: ChatMessage) => void;
   sendGroup: (group: ChatGroup) => void;
+  sendGroupDelete: (groupId: string, roomScope: string) => void;
   sendSignal: (signal: ChatCallSignal) => void;
+  sendCallPresence: (presence: ChatCallPresence) => void;
 };
 
 const fallbackChannelName = "fortetask-chat";
@@ -126,7 +152,9 @@ function parseSocketEvent(value: string): ChatSocketEvent | null {
       event.type === "chat:leave" ||
       event.type === "chat:message" ||
       event.type === "chat:signal" ||
-      event.type === "chat:group"
+      event.type === "chat:group" ||
+      event.type === "chat:group:delete" ||
+      event.type === "chat:call-presence"
     ) {
       return event as ChatSocketEvent;
     }
@@ -172,7 +200,9 @@ function connectChatSocket({
   announcePresence,
   onMessage,
   onGroup,
+  onGroupDelete,
   onPresenceChange,
+  onCallPresence,
   onSignal,
   onStatusChange,
 }: ChatSocketOptions): ChatSocketConnection {
@@ -211,6 +241,16 @@ function connectChatSocket({
 
     if (event.type === "chat:group") {
       onGroup?.(event.group);
+      return;
+    }
+
+    if (event.type === "chat:group:delete") {
+      onGroupDelete?.(event.groupId, event.roomScope);
+      return;
+    }
+
+    if (event.type === "chat:call-presence") {
+      onCallPresence?.(event);
     }
   }
 
@@ -353,10 +393,10 @@ function connectChatSocket({
 
       if (socket?.readyState === WebSocket.OPEN) {
         socket.send(serializedEvent);
-        return;
+      } else {
+        fallbackChannel?.postMessage(event);
       }
 
-      fallbackChannel?.postMessage(event);
       void fetch("/api/chat/messages", {
         method: "POST",
         headers: {
@@ -374,16 +414,38 @@ function connectChatSocket({
 
       if (socket?.readyState === WebSocket.OPEN) {
         socket.send(serializedEvent);
-        return;
+      } else {
+        fallbackChannel?.postMessage(event);
       }
 
-      fallbackChannel?.postMessage(event);
       void fetch("/api/chat/messages", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: serializedEvent,
+      });
+    },
+    sendGroupDelete: (groupId, roomScope) => {
+      const event = {
+        type: "chat:group:delete",
+        groupId,
+        roomScope,
+      } satisfies ChatSocketEvent;
+      const serializedEvent = JSON.stringify(event);
+
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(serializedEvent);
+      } else {
+        fallbackChannel?.postMessage(event);
+      }
+
+      void fetch("/api/chat/messages", {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ groupId, roomScope }),
       });
     },
     sendSignal: (signal) => {
@@ -405,6 +467,25 @@ function connectChatSocket({
           "Content-Type": "application/json",
         },
         body: serializedEvent,
+      });
+    },
+    sendCallPresence: (presence) => {
+      const serializedEvent = JSON.stringify(presence);
+
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(serializedEvent);
+      } else {
+        fallbackChannel?.postMessage(presence);
+      }
+
+      // keepalive so a leave fired during unload still reaches the server.
+      void fetch("/api/chat/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: serializedEvent,
+        keepalive: true,
       });
     },
   };

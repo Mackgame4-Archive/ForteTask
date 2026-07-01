@@ -1,7 +1,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { verifySession } from "@/lib/auth/session";
+import { db } from "@/lib/db";
 import type {
+  ChatCallKind,
   ChatCallSignal,
   ChatGroup,
   ChatMessage,
@@ -9,11 +11,15 @@ import type {
   ChatSocketUser,
 } from "@/lib/utils/sockets";
 
+type CallPresenceEntry = {
+  user: ChatSocketUser;
+  kind: ChatCallKind;
+};
+
 const globalChatStore = globalThis as typeof globalThis & {
-  __forteTaskChatGroups?: Map<string, Map<string, ChatGroup>>;
-  __forteTaskChatMessages?: Map<string, ChatMessage[]>;
   __forteTaskChatPresence?: Map<string, Map<number, ChatSocketUser>>;
   __forteTaskChatSubscribers?: Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>;
+  __forteTaskCallPresence?: Map<string, Map<string, Map<number, CallPresenceEntry>>>;
 };
 
 type ChatPostPayload = Partial<ChatMessage> & {
@@ -22,23 +28,16 @@ type ChatPostPayload = Partial<ChatMessage> & {
   signal?: Partial<ChatCallSignal>;
   type?: ChatSocketEvent["type"];
   user?: Partial<ChatSocketUser>;
+  roomScope?: string;
+  conversationKey?: string;
+  present?: boolean;
+  kind?: ChatCallKind;
 };
 
-function getMessageStore() {
-  globalChatStore.__forteTaskChatMessages ??= new Map<string, ChatMessage[]>();
-
-  return globalChatStore.__forteTaskChatMessages;
-}
-
-function getGroupStore() {
-  globalChatStore.__forteTaskChatGroups ??= new Map<string, Map<string, ChatGroup>>();
-
-  return globalChatStore.__forteTaskChatGroups;
-}
-
-function getRoomMessages(roomId: string) {
-  return getMessageStore().get(roomId) ?? [];
-}
+type ChatDeletePayload = {
+  groupId?: string;
+  roomScope?: string;
+};
 
 function getPresenceStore() {
   globalChatStore.__forteTaskChatPresence ??= new Map<
@@ -56,6 +55,25 @@ function getSubscriberStore() {
   >();
 
   return globalChatStore.__forteTaskChatSubscribers;
+}
+
+function getCallPresenceStore() {
+  globalChatStore.__forteTaskCallPresence ??= new Map<
+    string,
+    Map<string, Map<number, CallPresenceEntry>>
+  >();
+
+  return globalChatStore.__forteTaskCallPresence;
+}
+
+function getCallsPresenceRoomId(roomScope: string) {
+  return `${roomScope}:calls-presence`;
+}
+
+function getCallScopeFromRoomId(roomId: string) {
+  return roomId.endsWith(":calls-presence")
+    ? roomId.slice(0, -":calls-presence".length)
+    : null;
 }
 
 const sseEncoder = new TextEncoder();
@@ -84,6 +102,75 @@ function getGroupsRoomId(roomScope: string) {
   return `${roomScope}:groups`;
 }
 
+function toChatMessage(message: {
+  id: string;
+  roomId: string;
+  userId: number;
+  authorName: string;
+  authorEmail: string;
+  body: string;
+  createdAt: Date;
+}): ChatMessage {
+  return {
+    ...message,
+    createdAt: message.createdAt.toISOString(),
+  };
+}
+
+function toChatGroup(group: {
+  id: string;
+  roomScope: string;
+  name: string;
+  createdByUserId: number;
+  createdAt: Date;
+  members: {
+    userId: number;
+  }[];
+}): ChatGroup {
+  return {
+    id: group.id,
+    roomScope: group.roomScope,
+    name: group.name,
+    memberIds: group.members.map((member) => member.userId),
+    createdByUserId: group.createdByUserId,
+    createdAt: group.createdAt.toISOString(),
+  };
+}
+
+async function getRoomMessages(roomId: string) {
+  const messages = await db.chatMessage.findMany({
+    where: {
+      roomId,
+    },
+    orderBy: {
+      createdAt: "desc",
+    },
+    take: 100,
+  });
+
+  return messages.reverse().map(toChatMessage);
+}
+
+async function getRoomScopeGroups(roomScope: string) {
+  const groups = await db.chatGroup.findMany({
+    where: {
+      roomScope,
+    },
+    include: {
+      members: {
+        select: {
+          userId: true,
+        },
+      },
+    },
+    orderBy: {
+      name: "asc",
+    },
+  });
+
+  return groups.map(toChatGroup);
+}
+
 export async function GET(request: NextRequest) {
   await verifySession();
 
@@ -105,33 +192,54 @@ export async function GET(request: NextRequest) {
         roomSubscribers.add(controller);
         subscribers.set(roomId, roomSubscribers);
 
-        for (const message of getRoomMessages(roomId)) {
-          controller.enqueue(encodeSseEvent({
-            type: "chat:message",
-            message,
-          }));
-        }
-
-        for (const user of getPresenceStore().get(roomId)?.values() ?? []) {
-          controller.enqueue(encodeSseEvent({
-            type: "chat:join",
-            roomId,
-            user,
-          }));
-        }
-
-        for (const [roomScope, groups] of getGroupStore()) {
-          if (roomId !== getGroupsRoomId(roomScope)) {
-            continue;
-          }
-
-          for (const group of groups.values()) {
+        void (async () => {
+          for (const message of await getRoomMessages(roomId)) {
             controller.enqueue(encodeSseEvent({
-              type: "chat:group",
-              group,
+              type: "chat:message",
+              message,
             }));
           }
-        }
+
+          for (const user of getPresenceStore().get(roomId)?.values() ?? []) {
+            controller.enqueue(encodeSseEvent({
+              type: "chat:join",
+              roomId,
+              user,
+            }));
+          }
+
+          const roomScope = roomId.endsWith(":groups")
+            ? roomId.slice(0, -":groups".length)
+            : null;
+
+          if (roomScope) {
+            for (const group of await getRoomScopeGroups(roomScope)) {
+              controller.enqueue(encodeSseEvent({
+                type: "chat:group",
+                group,
+              }));
+            }
+          }
+
+          const callScope = getCallScopeFromRoomId(roomId);
+
+          if (callScope) {
+            const scopePresence = getCallPresenceStore().get(callScope);
+
+            for (const [conversationKey, entries] of scopePresence ?? []) {
+              for (const entry of entries.values()) {
+                controller.enqueue(encodeSseEvent({
+                  type: "chat:call-presence",
+                  roomScope: callScope,
+                  conversationKey,
+                  user: entry.user,
+                  present: true,
+                  kind: entry.kind,
+                }));
+              }
+            }
+          }
+        })();
 
         request.signal.addEventListener("abort", () => {
           clearInterval(heartbeat);
@@ -160,7 +268,7 @@ export async function GET(request: NextRequest) {
   }
 
   return NextResponse.json({
-    messages: getRoomMessages(roomId),
+    messages: await getRoomMessages(roomId),
   });
 }
 
@@ -227,6 +335,65 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ sent: true });
   }
 
+  if (payload.type === "chat:call-presence") {
+    const callPresenceUser = payload.user;
+
+    if (
+      !payload.roomScope ||
+      !payload.conversationKey ||
+      !callPresenceUser ||
+      callPresenceUser.id !== session.userId ||
+      !callPresenceUser.name ||
+      !callPresenceUser.email ||
+      (payload.kind !== "audio" && payload.kind !== "video")
+    ) {
+      return NextResponse.json(
+        { error: "Presenca de chamada invalida." },
+        { status: 400 }
+      );
+    }
+
+    const store = getCallPresenceStore();
+    const scopePresence =
+      store.get(payload.roomScope) ?? new Map<string, Map<number, CallPresenceEntry>>();
+    const conversationPresence =
+      scopePresence.get(payload.conversationKey) ?? new Map<number, CallPresenceEntry>();
+
+    if (payload.present) {
+      conversationPresence.set(callPresenceUser.id, {
+        user: callPresenceUser as ChatSocketUser,
+        kind: payload.kind,
+      });
+      scopePresence.set(payload.conversationKey, conversationPresence);
+      store.set(payload.roomScope, scopePresence);
+    } else {
+      conversationPresence.delete(callPresenceUser.id);
+
+      if (conversationPresence.size) {
+        scopePresence.set(payload.conversationKey, conversationPresence);
+      } else {
+        scopePresence.delete(payload.conversationKey);
+      }
+
+      if (scopePresence.size) {
+        store.set(payload.roomScope, scopePresence);
+      } else {
+        store.delete(payload.roomScope);
+      }
+    }
+
+    publishEvent(getCallsPresenceRoomId(payload.roomScope), {
+      type: "chat:call-presence",
+      roomScope: payload.roomScope,
+      conversationKey: payload.conversationKey,
+      user: callPresenceUser as ChatSocketUser,
+      present: Boolean(payload.present),
+      kind: payload.kind,
+    });
+
+    return NextResponse.json({ sent: true });
+  }
+
   if (group) {
     if (
       !group.id ||
@@ -241,19 +408,44 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const normalizedGroup: ChatGroup = {
-      id: group.id,
-      roomScope: group.roomScope,
-      name: group.name,
-      memberIds: Array.from(new Set([...group.memberIds, session.userId])),
-      createdByUserId: session.userId,
-      createdAt: group.createdAt ?? new Date().toISOString(),
-    };
-    const store = getGroupStore();
-    const scopeGroups = store.get(normalizedGroup.roomScope) ?? new Map<string, ChatGroup>();
+    const memberIds = Array.from(new Set([...group.memberIds, session.userId]));
+    const createdAt = group.createdAt ? new Date(group.createdAt) : new Date();
+    const savedGroup = await db.chatGroup.upsert({
+      where: {
+        id: group.id,
+      },
+      update: {
+        name: group.name,
+        members: {
+          createMany: {
+            data: memberIds.map((userId) => ({ userId })),
+            skipDuplicates: true,
+          },
+        },
+      },
+      create: {
+        id: group.id,
+        roomScope: group.roomScope,
+        name: group.name,
+        createdByUserId: session.userId,
+        createdAt,
+        members: {
+          createMany: {
+            data: memberIds.map((userId) => ({ userId })),
+            skipDuplicates: true,
+          },
+        },
+      },
+      include: {
+        members: {
+          select: {
+            userId: true,
+          },
+        },
+      },
+    });
+    const normalizedGroup = toChatGroup(savedGroup);
 
-    scopeGroups.set(normalizedGroup.id, normalizedGroup);
-    store.set(normalizedGroup.roomScope, scopeGroups);
     publishEvent(getGroupsRoomId(normalizedGroup.roomScope), {
       type: "chat:group",
       group: normalizedGroup,
@@ -299,21 +491,127 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const store = getMessageStore();
-  const messages = store.get(message.roomId) ?? [];
+  const chatMessage = message as ChatMessage;
 
-  if (!messages.some((currentMessage) => currentMessage.id === message.id)) {
-    const nextMessages = [
-      ...messages,
-      message as ChatMessage,
-    ].slice(-100);
+  try {
+    const savedMessage = await db.chatMessage.create({
+      data: {
+        id: chatMessage.id,
+        roomId: chatMessage.roomId,
+        userId: session.userId,
+        authorName: session.name.slice(0, 120),
+        authorEmail: session.email.slice(0, 255),
+        body: chatMessage.body.slice(0, 4000),
+        createdAt: new Date(chatMessage.createdAt),
+      },
+    });
 
-    store.set(message.roomId, nextMessages);
     publishEvent(message.roomId, {
       type: "chat:message",
-      message: message as ChatMessage,
+      message: toChatMessage(savedMessage),
     });
+  } catch {
+    return NextResponse.json({ saved: true });
   }
 
   return NextResponse.json({ saved: true });
+}
+
+export async function DELETE(request: NextRequest) {
+  const session = await verifySession();
+  const payload = (await request.json()) as ChatDeletePayload;
+
+  if (!payload.groupId || !payload.roomScope) {
+    return NextResponse.json(
+      { error: "Grupo inválido." },
+      { status: 400 }
+    );
+  }
+
+  const group = await db.chatGroup.findFirst({
+    where: {
+      id: payload.groupId,
+      roomScope: payload.roomScope,
+      members: {
+        some: {
+          userId: session.userId,
+        },
+      },
+    },
+    include: {
+      members: {
+        select: {
+          userId: true,
+        },
+      },
+    },
+  });
+
+  if (!group) {
+    return NextResponse.json(
+      { error: "Grupo não encontrado." },
+      { status: 404 }
+    );
+  }
+
+  if (group.createdByUserId === session.userId) {
+    await db.chatGroup.delete({
+      where: {
+        id: group.id,
+      },
+    });
+
+    publishEvent(getGroupsRoomId(group.roomScope), {
+      type: "chat:group:delete",
+      groupId: group.id,
+      roomScope: group.roomScope,
+    });
+
+    return NextResponse.json({ deleted: true });
+  }
+
+  await db.chatGroupMember.delete({
+    where: {
+      groupId_userId: {
+        groupId: group.id,
+        userId: session.userId,
+      },
+    },
+  });
+
+  const nextGroup = await db.chatGroup.findUnique({
+    where: {
+      id: group.id,
+    },
+    include: {
+      members: {
+        select: {
+          userId: true,
+        },
+      },
+    },
+  });
+
+  if (!nextGroup || !nextGroup.members.length) {
+    await db.chatGroup.delete({
+      where: {
+        id: group.id,
+      },
+    });
+
+    publishEvent(getGroupsRoomId(group.roomScope), {
+      type: "chat:group:delete",
+      groupId: group.id,
+      roomScope: group.roomScope,
+    });
+
+    return NextResponse.json({ deleted: true });
+  }
+
+  publishEvent(getGroupsRoomId(nextGroup.roomScope), {
+    type: "chat:group",
+    group: toChatGroup(nextGroup),
+  });
+
+  return NextResponse.json({ left: true });
 }

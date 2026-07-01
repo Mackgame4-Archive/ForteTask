@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect } from "react";
 import { CalendarDays, ChartGantt, Columns3, Table2 } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
@@ -12,23 +13,52 @@ import {
 
 type BoardView = "board" | "calendar" | "timeline" | "table";
 
+const boardViewStorageKey = "fortetask:boards:view";
+const boardViews = ["board", "calendar", "timeline", "table"] as const;
+
 type BoardViewSelectProps = {
   value: BoardView;
 };
+
+function isBoardView(value: string | null): value is BoardView {
+  return boardViews.some((view) => view === value);
+}
 
 function BoardViewSelect({ value }: BoardViewSelectProps) {
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
 
+  useEffect(() => {
+    try {
+      if (searchParams.has("view")) {
+        window.localStorage.setItem(boardViewStorageKey, value);
+        return;
+      }
+
+      const savedView = window.localStorage.getItem(boardViewStorageKey);
+
+      if (!isBoardView(savedView) || savedView === value) {
+        return;
+      }
+
+      const params = new URLSearchParams(searchParams);
+      params.set("view", savedView);
+      router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+    } catch {
+      // Ignore storage access errors and keep the URL-selected view.
+    }
+  }, [pathname, router, searchParams, value]);
+
   function updateView(nextView: string | null) {
-    if (
-      nextView !== "board" &&
-      nextView !== "calendar" &&
-      nextView !== "timeline" &&
-      nextView !== "table"
-    ) {
+    if (!isBoardView(nextView)) {
       return;
+    }
+
+    try {
+      window.localStorage.setItem(boardViewStorageKey, nextView);
+    } catch {
+      // The URL remains the source of truth when storage is unavailable.
     }
 
     const params = new URLSearchParams(searchParams);

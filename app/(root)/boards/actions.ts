@@ -5,8 +5,15 @@ import { redirect } from "next/navigation";
 import { verifySession } from "@/lib/auth/session";
 import { db } from "@/lib/db";
 import {
+  deleteTaskAttachmentObject,
+  getTaskAttachmentObjectKey,
+  taskAttachmentBucket,
+  uploadTaskAttachmentObject,
+} from "@/lib/storage/task-attachments";
+import {
   boardSchema,
   createColumnSchema,
+  createTaskCommentSchema,
   createTaskSchema,
   deleteColumnSchema,
   deleteTaskSchema,
@@ -15,6 +22,7 @@ import {
   toggleTaskCompletedSchema,
   updateBoardSchema,
   updateColumnSchema,
+  updateTaskDatesSchema,
   updateTaskSchema,
 } from "@/schemas/boards";
 
@@ -23,8 +31,77 @@ function boardsRedirect(message: string, type: "error" | "saved" = "saved"): nev
   redirect(`/boards?${params.toString()}`);
 }
 
+const maxTaskAttachmentSize = 25 * 1024 * 1024;
+
+function taskActivityData({
+  taskId,
+  actorId,
+  type,
+  message,
+}: {
+  taskId: number;
+  actorId: number;
+  type: string;
+  message: string;
+}) {
+  return {
+    taskId,
+    actorId,
+    type,
+    message,
+  };
+}
+
+function boardTaskRedirectUrl({
+  boardId,
+  formData,
+  message,
+  type = "saved",
+}: {
+  boardId: number;
+  formData: FormData;
+  message: string;
+  type?: "error" | "saved";
+}) {
+  const fallbackPath = `/boards/${boardId}`;
+  const redirectTo = formData.get("redirectTo")?.toString() || fallbackPath;
+  const url = new URL(redirectTo, "http://fortetask.local");
+  const allowedPath = `/boards/${boardId}`;
+  const isBoardPath =
+    url.origin === "http://fortetask.local" &&
+    (url.pathname === allowedPath || url.pathname.startsWith(`${allowedPath}/`));
+
+  if (!isBoardPath) {
+    const params = new URLSearchParams({ [type]: message });
+
+    return `${fallbackPath}?${params.toString()}`;
+  }
+
+  url.searchParams.delete("error");
+  url.searchParams.delete("saved");
+  url.searchParams.set(type, message);
+
+  return `${url.pathname}?${url.searchParams.toString()}`;
+}
+
 function canManageBoards(role?: string) {
   return role === "admin" || role === "manager" || role === "coordinator";
+}
+
+function startOfDateOnly(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function applyDatePart(currentDate: Date | null, targetDate: Date) {
+  return new Date(
+    targetDate.getFullYear(),
+    targetDate.getMonth(),
+    targetDate.getDate(),
+    currentDate?.getHours() ?? 0,
+    currentDate?.getMinutes() ?? 0,
+    currentDate?.getSeconds() ?? 0,
+    currentDate?.getMilliseconds() ?? 0
+  );
 }
 
 function parseSubTasks(formData: FormData) {
@@ -178,7 +255,9 @@ async function findAccessibleTask({
       columnId: true,
       completed: true,
       completedAt: true,
+      dueDate: true,
       position: true,
+      startDate: true,
       column: {
         select: {
           boardId: true,
@@ -893,39 +972,55 @@ export async function createTaskAction(formData: FormData) {
     }),
   ]);
 
-  await db.task.create({
-    data: {
-      tenantId: membership.tenantId,
-      columnId: column.id,
-      createdById: session.userId,
-      title: parsed.data.title,
-      description: parsed.data.description || null,
-      startDate: parsed.data.startDate ?? null,
-      dueDate: parsed.data.dueDate ?? null,
-      position: column._count.tasks,
-      ...(labels.length
-        ? {
-            labels: {
-              create: labels.map((label) => ({
-                boardLabelId: label.id,
-              })),
-            },
-          }
-        : {}),
-      ...(assigneeIds.length
-        ? {
-            assignees: {
-              create: assigneeIds.map((userId) => ({
-                userId,
-              })),
-            },
-          }
-        : {}),
-    },
+  await db.$transaction(async (tx) => {
+    const createdTask = await tx.task.create({
+      data: {
+        tenantId: membership.tenantId,
+        columnId: column.id,
+        createdById: session.userId,
+        title: parsed.data.title,
+        description: parsed.data.description || null,
+        startDate: parsed.data.startDate ?? null,
+        dueDate: parsed.data.dueDate ?? null,
+        position: column._count.tasks,
+        ...(labels.length
+          ? {
+              labels: {
+                create: labels.map((label) => ({
+                  boardLabelId: label.id,
+                })),
+              },
+            }
+          : {}),
+        ...(assigneeIds.length
+          ? {
+              assignees: {
+                create: assigneeIds.map((userId) => ({
+                  userId,
+                })),
+              },
+            }
+          : {}),
+      },
+    });
+
+    await tx.taskActivity.create({
+      data: taskActivityData({
+        taskId: createdTask.id,
+        actorId: session.userId,
+        type: "task.created",
+        message: "criou a tarefa",
+      }),
+    });
   });
 
-  const params = new URLSearchParams({ saved: "Tarefa criada." });
-  redirect(`/boards/${column.boardId}?${params.toString()}`);
+  redirect(
+    boardTaskRedirectUrl({
+      boardId: column.boardId,
+      formData,
+      message: "Tarefa criada.",
+    })
+  );
 }
 
 export async function updateTaskAction(formData: FormData) {
@@ -1215,10 +1310,90 @@ export async function updateTaskAction(formData: FormData) {
         data: customFieldValues,
       });
     }
+
+    await tx.taskActivity.create({
+      data: taskActivityData({
+        taskId: task.id,
+        actorId: session.userId,
+        type: "task.updated",
+        message:
+          task.columnId !== targetColumn.id
+            ? "moveu a tarefa e atualizou os detalhes"
+            : "atualizou os detalhes da tarefa",
+      }),
+    });
   });
 
-  const params = new URLSearchParams({ saved: "Tarefa atualizada." });
-  redirect(`/boards/${taskBoardId}?${params.toString()}`);
+  redirect(
+    boardTaskRedirectUrl({
+      boardId: taskBoardId,
+      formData,
+      message: "Tarefa atualizada.",
+    })
+  );
+}
+
+export async function createTaskCommentAction(formData: FormData) {
+  const session = await verifySession();
+
+  const parsed = createTaskCommentSchema.safeParse({
+    boardId: formData.get("boardId"),
+    taskId: formData.get("taskId"),
+    body: formData.get("body"),
+  });
+
+  if (!session.activeTenantId || !parsed.success) {
+    boardsRedirect("Não foi possível adicionar o comentário.", "error");
+  }
+
+  const membership = await db.tenantUser.findUnique({
+    where: {
+      userId_tenantId: {
+        userId: session.userId,
+        tenantId: session.activeTenantId,
+      },
+    },
+    select: {
+      tenantId: true,
+      tenant: {
+        select: {
+          deletedAt: true,
+        },
+      },
+    },
+  });
+
+  if (!membership || membership.tenant.deletedAt) {
+    boardsRedirect("Não tem acesso a esta organização.", "error");
+  }
+
+  const task = await findAccessibleTask({
+    boardId: parsed.data.boardId,
+    taskId: parsed.data.taskId,
+    tenantId: membership.tenantId,
+    userId: session.userId,
+    role: session.role,
+  });
+
+  if (!task) {
+    boardsRedirect("A tarefa não foi encontrada.", "error");
+  }
+
+  await db.taskComment.create({
+    data: {
+      taskId: task.id,
+      authorId: session.userId,
+      body: parsed.data.body,
+    },
+  });
+
+  redirect(
+    boardTaskRedirectUrl({
+      boardId: task.column?.boardId ?? parsed.data.boardId,
+      formData,
+      message: "Comentário adicionado.",
+    })
+  );
 }
 
 export async function moveTaskAction(formData: FormData) {
@@ -1385,6 +1560,124 @@ export async function moveTaskAction(formData: FormData) {
   return { saved: true };
 }
 
+export async function updateTaskDatesAction(formData: FormData) {
+  const session = await verifySession();
+
+  if (!session.activeTenantId) {
+    return { error: "Selecione uma organização antes de editar uma tarefa." };
+  }
+
+  const parsed = updateTaskDatesSchema.safeParse({
+    boardId: formData.get("boardId"),
+    taskId: formData.get("taskId"),
+    edge: formData.get("edge"),
+    targetDate: formData.get("targetDate"),
+  });
+
+  if (!parsed.success || !parsed.data.targetDate) {
+    return { error: "Não foi possível atualizar as datas da tarefa." };
+  }
+
+  const membership = await db.tenantUser.findUnique({
+    where: {
+      userId_tenantId: {
+        userId: session.userId,
+        tenantId: session.activeTenantId,
+      },
+    },
+    select: {
+      tenantId: true,
+      tenant: {
+        select: {
+          deletedAt: true,
+        },
+      },
+    },
+  });
+
+  if (!membership || membership.tenant.deletedAt) {
+    return { error: "Não tem acesso a esta organização." };
+  }
+
+  const task = await findAccessibleTask({
+    boardId: parsed.data.boardId,
+    taskId: parsed.data.taskId,
+    tenantId: membership.tenantId,
+    userId: session.userId,
+    role: session.role,
+  });
+
+  if (!task) {
+    return { error: "A tarefa não foi encontrada." };
+  }
+
+  const targetDate = parsed.data.targetDate;
+
+  if (parsed.data.edge === "start") {
+    const nextStartDate = applyDatePart(task.startDate, targetDate);
+
+    if (
+      task.dueDate &&
+      startOfDateOnly(nextStartDate) > startOfDateOnly(task.dueDate)
+    ) {
+      return { error: "A data de início não pode ficar depois da data limite." };
+    }
+
+    await db.$transaction(async (tx) => {
+      await tx.task.update({
+        where: {
+          id: task.id,
+        },
+        data: {
+          startDate: nextStartDate,
+        },
+      });
+
+      await tx.taskActivity.create({
+        data: taskActivityData({
+          taskId: task.id,
+          actorId: session.userId,
+          type: "task.date.updated",
+          message: "alterou a data de início",
+        }),
+      });
+    });
+
+    return { saved: true };
+  }
+
+  const nextDueDate = applyDatePart(task.dueDate, targetDate);
+
+  if (
+    task.startDate &&
+    startOfDateOnly(nextDueDate) < startOfDateOnly(task.startDate)
+  ) {
+    return { error: "A data limite não pode ficar antes da data de início." };
+  }
+
+  await db.$transaction(async (tx) => {
+    await tx.task.update({
+      where: {
+        id: task.id,
+      },
+      data: {
+        dueDate: nextDueDate,
+      },
+    });
+
+    await tx.taskActivity.create({
+      data: taskActivityData({
+        taskId: task.id,
+        actorId: session.userId,
+        type: "task.date.updated",
+        message: "alterou a data limite",
+      }),
+    });
+  });
+
+  return { saved: true };
+}
+
 export async function moveColumnAction(formData: FormData) {
   const session = await verifySession();
 
@@ -1532,8 +1825,216 @@ export async function deleteTaskAction(formData: FormData) {
     },
   });
 
-  const params = new URLSearchParams({ saved: "Tarefa eliminada." });
-  redirect(`/boards/${task.column?.boardId ?? parsed.data.boardId}?${params.toString()}`);
+  redirect(
+    boardTaskRedirectUrl({
+      boardId: task.column?.boardId ?? parsed.data.boardId,
+      formData,
+      message: "Tarefa eliminada.",
+    })
+  );
+}
+
+export async function uploadTaskAttachmentAction(formData: FormData) {
+  const session = await verifySession();
+  const boardId = Number(formData.get("boardId"));
+  const taskId = Number(formData.get("taskId"));
+  const file = formData.get("attachment");
+
+  if (
+    !session.activeTenantId ||
+    !Number.isInteger(boardId) ||
+    !Number.isInteger(taskId)
+  ) {
+    boardsRedirect("Não foi possível anexar o ficheiro.", "error");
+  }
+
+  if (!(file instanceof File) || file.size <= 0) {
+    redirect(
+      boardTaskRedirectUrl({
+        boardId,
+        formData,
+        message: "Escolha um ficheiro para anexar.",
+        type: "error",
+      })
+    );
+  }
+
+  if (file.size > maxTaskAttachmentSize) {
+    redirect(
+      boardTaskRedirectUrl({
+        boardId,
+        formData,
+        message: "O ficheiro não pode exceder 25 MB.",
+        type: "error",
+      })
+    );
+  }
+
+  const membership = await db.tenantUser.findUnique({
+    where: {
+      userId_tenantId: {
+        userId: session.userId,
+        tenantId: session.activeTenantId,
+      },
+    },
+    select: {
+      tenantId: true,
+      tenant: {
+        select: {
+          deletedAt: true,
+        },
+      },
+    },
+  });
+
+  if (!membership || membership.tenant.deletedAt) {
+    boardsRedirect("Não tem acesso a esta organização.", "error");
+  }
+
+  const task = await findAccessibleTask({
+    boardId,
+    taskId,
+    tenantId: membership.tenantId,
+    userId: session.userId,
+    role: session.role,
+  });
+
+  if (!task) {
+    boardsRedirect("A tarefa não foi encontrada.", "error");
+  }
+
+  const fileName = file.name.slice(0, 255) || "anexo";
+  const contentType = file.type || "application/octet-stream";
+  const objectKey = getTaskAttachmentObjectKey({ fileName, taskId: task.id });
+  const body = Buffer.from(await file.arrayBuffer());
+
+  await uploadTaskAttachmentObject({
+    body,
+    contentType,
+    objectKey,
+  });
+
+  await db.$transaction(async (tx) => {
+    await tx.taskAttachment.create({
+      data: {
+        taskId: task.id,
+        uploadedById: session.userId,
+        bucket: taskAttachmentBucket,
+        objectKey,
+        fileName,
+        contentType,
+        size: file.size,
+      },
+    });
+
+    await tx.taskActivity.create({
+      data: taskActivityData({
+        taskId: task.id,
+        actorId: session.userId,
+        type: "task.attachment.created",
+        message: `adicionou o anexo ${fileName}`,
+      }),
+    });
+  });
+
+  redirect(
+    boardTaskRedirectUrl({
+      boardId: task.column?.boardId ?? boardId,
+      formData,
+      message: "Anexo adicionado.",
+    })
+  );
+}
+
+export async function deleteTaskAttachmentAction(formData: FormData) {
+  const session = await verifySession();
+  const boardId = Number(formData.get("boardId"));
+  const taskId = Number(formData.get("taskId"));
+  const attachmentId = Number(formData.get("attachmentId"));
+
+  if (
+    !session.activeTenantId ||
+    !Number.isInteger(boardId) ||
+    !Number.isInteger(taskId) ||
+    !Number.isInteger(attachmentId)
+  ) {
+    boardsRedirect("Não foi possível eliminar o anexo.", "error");
+  }
+
+  const membership = await db.tenantUser.findUnique({
+    where: {
+      userId_tenantId: {
+        userId: session.userId,
+        tenantId: session.activeTenantId,
+      },
+    },
+    select: {
+      tenantId: true,
+      tenant: {
+        select: {
+          deletedAt: true,
+        },
+      },
+    },
+  });
+
+  if (!membership || membership.tenant.deletedAt) {
+    boardsRedirect("Não tem acesso a esta organização.", "error");
+  }
+
+  const task = await findAccessibleTask({
+    boardId,
+    taskId,
+    tenantId: membership.tenantId,
+    userId: session.userId,
+    role: session.role,
+  });
+
+  if (!task) {
+    boardsRedirect("A tarefa não foi encontrada.", "error");
+  }
+
+  const attachment = await db.taskAttachment.findFirst({
+    where: {
+      id: attachmentId,
+      taskId: task.id,
+    },
+    select: {
+      id: true,
+      objectKey: true,
+      fileName: true,
+    },
+  });
+
+  if (!attachment) {
+    boardsRedirect("O anexo não foi encontrado.", "error");
+  }
+
+  await db.$transaction(async (tx) => {
+    await tx.taskAttachment.delete({
+      where: {
+        id: attachment.id,
+      },
+    });
+
+    await tx.taskActivity.create({
+      data: taskActivityData({
+        taskId: task.id,
+        actorId: session.userId,
+        type: "task.attachment.deleted",
+        message: `eliminou o anexo ${attachment.fileName}`,
+      }),
+    });
+  });
+  await deleteTaskAttachmentObject(attachment.objectKey);
+
+  redirect(
+    boardTaskRedirectUrl({
+      boardId: task.column?.boardId ?? boardId,
+      formData,
+      message: "Anexo eliminado.",
+    })
+  );
 }
 
 export async function toggleTaskCompletedAction(formData: FormData) {
@@ -1586,16 +2087,27 @@ export async function toggleTaskCompletedAction(formData: FormData) {
     return { error: "A tarefa não foi encontrada." };
   }
 
-  await db.task.update({
-    where: {
-      id: task.id,
-    },
-    data: {
-      completed: parsed.data.completed,
-      completedAt: parsed.data.completed
-        ? task.completedAt ?? new Date()
-        : null,
-    },
+  await db.$transaction(async (tx) => {
+    await tx.task.update({
+      where: {
+        id: task.id,
+      },
+      data: {
+        completed: parsed.data.completed,
+        completedAt: parsed.data.completed
+          ? task.completedAt ?? new Date()
+          : null,
+      },
+    });
+
+    await tx.taskActivity.create({
+      data: taskActivityData({
+        taskId: task.id,
+        actorId: session.userId,
+        type: parsed.data.completed ? "task.completed" : "task.reopened",
+        message: parsed.data.completed ? "concluiu a tarefa" : "reabriu a tarefa",
+      }),
+    });
   });
 
   return { saved: true, completed: parsed.data.completed };

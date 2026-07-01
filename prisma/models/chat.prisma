@@ -1,0 +1,43 @@
+model ChatMessage {
+  id String @id @db.VarChar(80)
+  roomId String @map("room_id") @db.VarChar(160)
+  userId Int @map("user_id")
+  authorName String @map("author_name") @db.VarChar(120)
+  authorEmail String @map("author_email") @db.VarChar(255)
+  body String @db.VarChar(4000)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([roomId, createdAt])
+  @@index([userId])
+  @@map("chat_message")
+}
+
+model ChatGroup {
+  id String @id @db.VarChar(80)
+  roomScope String @map("room_scope") @db.VarChar(80)
+  name String @db.VarChar(120)
+  createdByUserId Int @map("created_by_user_id")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  createdBy User @relation("ChatGroupCreatedBy", fields: [createdByUserId], references: [id], onDelete: Cascade)
+  members ChatGroupMember[]
+
+  @@index([roomScope])
+  @@index([createdByUserId])
+  @@map("chat_group")
+}
+
+model ChatGroupMember {
+  groupId String @map("group_id") @db.VarChar(80)
+  userId Int @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  group ChatGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([groupId, userId])
+  @@index([userId])
+  @@map("chat_group_member")
+}

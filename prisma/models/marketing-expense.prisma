@@ -1,11 +1,11 @@
 model MarketingExpense {
-  id        Int                      @id @default(autoincrement())
-  tenantId  Int                      @map("tenant_id")
-  platform  MarketingPlatform
-  amount    Decimal                  @db.Decimal(12, 2)
-  day       DateTime                 @db.Date
-  createdAt DateTime                 @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt DateTime                 @updatedAt @map("updated_at") @db.Timestamptz
+  id Int @id @default(autoincrement())
+  tenantId Int @map("tenant_id")
+  platform MarketingPlatform
+  amount Decimal @db.Decimal(12, 2)
+  day DateTime @db.Date
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
