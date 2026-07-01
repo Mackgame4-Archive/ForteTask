@@ -17,9 +17,9 @@ type CallPresenceEntry = {
 };
 
 const globalChatStore = globalThis as typeof globalThis & {
-  __forteTaskChatPresence?: Map<string, Map<number, ChatSocketUser>>;
-  __forteTaskChatSubscribers?: Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>;
-  __forteTaskCallPresence?: Map<string, Map<string, Map<number, CallPresenceEntry>>>;
+  __intraNetChatPresence?: Map<string, Map<number, ChatSocketUser>>;
+  __intraNetChatSubscribers?: Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>;
+  __intraNetCallPresence?: Map<string, Map<string, Map<number, CallPresenceEntry>>>;
 };
 
 type ChatPostPayload = Partial<ChatMessage> & {
@@ -40,30 +40,30 @@ type ChatDeletePayload = {
 };
 
 function getPresenceStore() {
-  globalChatStore.__forteTaskChatPresence ??= new Map<
+  globalChatStore.__intraNetChatPresence ??= new Map<
     string,
     Map<number, ChatSocketUser>
   >();
 
-  return globalChatStore.__forteTaskChatPresence;
+  return globalChatStore.__intraNetChatPresence;
 }
 
 function getSubscriberStore() {
-  globalChatStore.__forteTaskChatSubscribers ??= new Map<
+  globalChatStore.__intraNetChatSubscribers ??= new Map<
     string,
     Set<ReadableStreamDefaultController<Uint8Array>>
   >();
 
-  return globalChatStore.__forteTaskChatSubscribers;
+  return globalChatStore.__intraNetChatSubscribers;
 }
 
 function getCallPresenceStore() {
-  globalChatStore.__forteTaskCallPresence ??= new Map<
+  globalChatStore.__intraNetCallPresence ??= new Map<
     string,
     Map<string, Map<number, CallPresenceEntry>>
   >();
 
-  return globalChatStore.__forteTaskCallPresence;
+  return globalChatStore.__intraNetCallPresence;
 }
 
 function getCallsPresenceRoomId(roomScope: string) {

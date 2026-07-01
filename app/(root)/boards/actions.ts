@@ -65,10 +65,10 @@ function boardTaskRedirectUrl({
 }) {
   const fallbackPath = `/boards/${boardId}`;
   const redirectTo = formData.get("redirectTo")?.toString() || fallbackPath;
-  const url = new URL(redirectTo, "http://fortetask.local");
+  const url = new URL(redirectTo, "http://intranet.local");
   const allowedPath = `/boards/${boardId}`;
   const isBoardPath =
-    url.origin === "http://fortetask.local" &&
+    url.origin === "http://intranet.local" &&
     (url.pathname === allowedPath || url.pathname.startsWith(`${allowedPath}/`));
 
   if (!isBoardPath) {

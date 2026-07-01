@@ -57,6 +57,6 @@ export default <MenuItem[]>[
         submenu: [{ name: "Todos os membros", href: "/members" }],
     },
     { name: "Chat", href: "/chat", icon: MessageCircle },
-    { name: "ForteAI", href: "/chat-ai", icon: Bot, badge: { variant: "secondary", icon: ExternalLink } },
+    { name: "IntraAI", href: "/chat-ai", icon: Bot, badge: { variant: "secondary", icon: ExternalLink } },
     { name: "Definições", href: "/settings", icon: Settings },
 ];

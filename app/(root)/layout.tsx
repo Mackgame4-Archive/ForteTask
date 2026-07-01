@@ -74,7 +74,7 @@ export default async function RootLayout({
               {Config.APP_NAME}
             </span>
             <Image
-              src="/fortetask_logo.png"
+              src="/intranet_logo.png"
               alt=""
               width={28}
               height={28}

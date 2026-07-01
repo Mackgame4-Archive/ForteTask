@@ -28,7 +28,7 @@ type S3DownloadUrlInput = {
   objectKey: string;
 };
 
-const defaultBucket = process.env.S3_BUCKET ?? "fortetask";
+const defaultBucket = process.env.S3_BUCKET ?? "intranet";
 const endpoint = process.env.S3_ENDPOINT;
 const publicEndpoint = process.env.S3_PUBLIC_ENDPOINT;
 const region = process.env.S3_REGION ?? "us-east-1";

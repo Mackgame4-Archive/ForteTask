@@ -34,7 +34,7 @@ function databaseConnectionParts(url: string) {
 }
 
 const outputPath = resolve(
-  process.argv[2] ?? `backups/fortetask-${timestamp()}.dump`
+  process.argv[2] ?? `backups/intranet-${timestamp()}.dump`
 );
 
 await mkdir(dirname(outputPath), { recursive: true });

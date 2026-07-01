@@ -5,8 +5,8 @@ services:
       dockerfile: Dockerfile
       args:
         APP_PORT: ${APP_PORT:-3000}
-        DATABASE_URL: postgresql://${POSTGRES_USER:-fortetask}:${POSTGRES_PASSWORD:-fortetask_password}@postgres:5432/${POSTGRES_DB:-fortetask}
-    container_name: fortetask-app
+        DATABASE_URL: postgresql://${POSTGRES_USER:-intranet}:${POSTGRES_PASSWORD:-intranet_password}@postgres:5432/${POSTGRES_DB:-intranet}
+    container_name: intranet-app
     restart: unless-stopped
     depends_on:
       postgres:
@@ -17,19 +17,19 @@ services:
       NODE_ENV: production
       NEXT_TELEMETRY_DISABLED: 1
       NEXT_PUBLIC_BASE_URL: ${NEXT_PUBLIC_BASE_URL:-http://localhost:3000}
-      DATABASE_URL: postgresql://${POSTGRES_USER:-fortetask}:${POSTGRES_PASSWORD:-fortetask_password}@postgres:5432/${POSTGRES_DB:-fortetask}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-intranet}:${POSTGRES_PASSWORD:-intranet_password}@postgres:5432/${POSTGRES_DB:-intranet}
       USE_HTTPS: ${USE_HTTPS:-false}
-      POSTGRES_DB: ${POSTGRES_DB:-fortetask}
-      POSTGRES_USER: ${POSTGRES_USER:-fortetask}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fortetask_password}
+      POSTGRES_DB: ${POSTGRES_DB:-intranet}
+      POSTGRES_USER: ${POSTGRES_USER:-intranet}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-intranet_password}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       S3_ENDPOINT: http://minio:9000
       S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://localhost:9000}
       S3_REGION: ${S3_REGION:-us-east-1}
-      S3_BUCKET: ${S3_BUCKET:-fortetask}
-      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-fortetask}
-      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-fortetask_minio_password}
+      S3_BUCKET: ${S3_BUCKET:-intranet}
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-intranet}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-intranet_minio_password}
       S3_FORCE_PATH_STYLE: "true"
     ports:
       - "${APP_PORT:-3000}:3000"
@@ -41,30 +41,30 @@ services:
 
   postgres:
     image: postgres:17-alpine
-    container_name: fortetask-postgres
+    container_name: intranet-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-fortetask}
-      POSTGRES_USER: ${POSTGRES_USER:-fortetask}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fortetask_password}
+      POSTGRES_DB: ${POSTGRES_DB:-intranet}
+      POSTGRES_USER: ${POSTGRES_USER:-intranet}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-intranet_password}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fortetask} -d ${POSTGRES_DB:-fortetask}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-intranet} -d ${POSTGRES_DB:-intranet}"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   minio:
     image: minio/minio:RELEASE.2025-05-24T17-08-30Z
-    container_name: fortetask-minio
+    container_name: intranet-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-fortetask}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-fortetask_minio_password}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-intranet}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-intranet_minio_password}
     ports:
       - "${MINIO_API_PORT:-9000}:9000"
       - "${MINIO_CONSOLE_PORT:-9001}:9001"
@@ -78,7 +78,7 @@ services:
 
   caddy:
     image: caddy:2-alpine
-    container_name: fortetask-caddy
+    container_name: intranet-caddy
     profiles:
       - https
     restart: unless-stopped

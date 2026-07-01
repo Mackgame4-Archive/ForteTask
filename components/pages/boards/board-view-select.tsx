@@ -13,7 +13,7 @@ import {
 
 type BoardView = "board" | "calendar" | "timeline" | "table";
 
-const boardViewStorageKey = "fortetask:boards:view";
+const boardViewStorageKey = "intranet:boards:view";
 const boardViews = ["board", "calendar", "timeline", "table"] as const;
 
 type BoardViewSelectProps = {

@@ -21,7 +21,7 @@ COPY . .
 # prisma generate / next build only need this var to resolve at config-load time;
 # they don't actually connect to the DB. A placeholder is enough for the build.
 # Override at build with --build-arg DATABASE_URL=... if a real connection is needed.
-ARG DATABASE_URL="postgresql://fortetask:fortetask_password@localhost:5432/fortetask?schema=public"
+ARG DATABASE_URL="postgresql://intranet:intranet_password@localhost:5432/intranet?schema=public"
 ENV DATABASE_URL=$DATABASE_URL
 
 ARG APP_PORT=3000

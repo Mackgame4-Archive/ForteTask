@@ -141,7 +141,7 @@ type ChatSocketConnection = {
   sendCallPresence: (presence: ChatCallPresence) => void;
 };
 
-const fallbackChannelName = "fortetask-chat";
+const fallbackChannelName = "intranet-chat";
 
 function parseSocketEvent(value: string): ChatSocketEvent | null {
   try {
