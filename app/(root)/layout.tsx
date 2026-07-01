@@ -74,7 +74,7 @@ export default async function RootLayout({
               {Config.APP_NAME}
             </span>
             <Image
-              src="/intranet_logo.png"
+              src="/logo.png"
               alt=""
               width={28}
               height={28}
